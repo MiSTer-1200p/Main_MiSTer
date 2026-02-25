@@ -14,7 +14,7 @@
 #include "cfg.h"
 #include "user_io.h"
 
-#define FB_SIZE  (1920*1080)
+#define FB_SIZE  (1920*1200)
 #define SCALE_DIM(dim, ref, target) ((dim) * (target) / (ref))
 
 Imlib_Image load_screen_bg()
