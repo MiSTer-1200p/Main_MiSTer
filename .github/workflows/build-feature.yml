@@ -1,0 +1,118 @@
+name: Build Feature Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: 'Release filename from upstream (e.g. MiSTer_20260220)'
+        required: false
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build with Docker
+        run: |
+          docker run --rm \
+            -v "$PWD:/build" \
+            -w /build \
+            theypsilon/gcc-arm:10.2-2020.11 \
+            bash -c "make clean && make"
+
+      - name: Verify build output
+        run: |
+          if [ -f bin/MiSTer ]; then
+            echo "Build successful"
+            ls -lh bin/MiSTer
+            file bin/MiSTer
+          else
+            echo "::error::Build failed - binary not found"
+            exit 1
+          fi
+
+      - name: Determine release name
+        id: release
+        run: |
+          if [ -n "${{ inputs.release_name }}" ]; then
+            echo "name=${{ inputs.release_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=MiSTer_$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish release
+        run: |
+          cp bin/MiSTer "releases/${{ steps.release.outputs.name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "releases/${{ steps.release.outputs.name }}"
+          git commit -m "Release ${{ steps.release.outputs.name }}"
+          git push origin ${{ github.ref_name }}
+
+      - name: Generate distribution database
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          DB_BRANCH="db/${BRANCH}"
+          HASH=$(md5sum bin/MiSTer | cut -d' ' -f1)
+          SIZE=$(stat -c%s bin/MiSTer)
+          TIMESTAMP=$(date +%s)
+          BINARY_URL="https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH}/releases/${{ steps.release.outputs.name }}"
+
+          # Select upstream db.json.zip based on branch
+          case "$BRANCH" in
+            db9|full)
+              UPSTREAM_DB_URL="https://raw.githubusercontent.com/MiSTer-DB9/Distribution_MiSTer/main/dbencc.json.zip"
+              UPSTREAM_DB_NAME="dbencc.json"
+              ;;
+            *)
+              UPSTREAM_DB_URL="https://raw.githubusercontent.com/MiSTer-devel/Distribution_MiSTer/main/db.json.zip"
+              UPSTREAM_DB_NAME="db.json"
+              ;;
+          esac
+
+          # Download and patch upstream db.json
+          curl -sL "$UPSTREAM_DB_URL" -o /tmp/upstream_db.zip
+          cd /tmp && unzip -o upstream_db.zip && cd -
+
+          python3 -c "
+          import json, time
+          with open('/tmp/${UPSTREAM_DB_NAME}') as f:
+              db = json.load(f)
+          db['timestamp'] = ${TIMESTAMP}
+          db['files']['MiSTer'] = {
+              'hash': '${HASH}',
+              'size': ${SIZE},
+              'url': '${BINARY_URL}',
+              'path': 'system',
+              'reboot': True,
+              'tags': db['files'].get('MiSTer', {}).get('tags', []),
+              'backup': '.MiSTer.old',
+              'tmp': 'MiSTer.new'
+          }
+          with open('/tmp/db.json', 'w') as f:
+              json.dump(db, f, separators=(',', ':'))
+          "
+
+          cd /tmp && zip -9 db.json.zip db.json && cd -
+
+          # Push to orphan db branch
+          git checkout --orphan "${DB_BRANCH}" 2>/dev/null || git checkout "${DB_BRANCH}" 2>/dev/null || git checkout --orphan "${DB_BRANCH}"
+          git rm -rf . 2>/dev/null || true
+          cp /tmp/db.json.zip .
+          git add db.json.zip
+          git commit -m "Update database for ${BRANCH} - ${{ steps.release.outputs.name }}"
+          git push origin "${DB_BRANCH}" --force
+          git checkout "${BRANCH}"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiSTer-${{ github.ref_name }}-${{ github.run_number }}
+          path: |
+            bin/MiSTer
+            bin/MiSTer.elf
+          retention-days: 30
