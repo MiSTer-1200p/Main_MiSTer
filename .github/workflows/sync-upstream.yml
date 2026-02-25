@@ -1,0 +1,490 @@
+name: Sync from Upstreams
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-master:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/MiSTer-devel/Main_MiSTer.git
+          git fetch upstream master
+
+      - name: Save pre-sync HEAD
+        run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Rebase on upstream
+        run: |
+          set +e; git rebase upstream/master; EXIT=$?; set -e
+          while [ $EXIT -ne 0 ]; do
+            UNMERGED=$(git diff --name-only --diff-filter=U)
+            NON_RELEASE=$(echo "$UNMERGED" | grep -v '^releases/' | grep -v '^$' || true)
+            if [ -n "$NON_RELEASE" ]; then
+              echo "::error::Rebase conflict requires manual intervention: $NON_RELEASE"
+              git rebase --abort; exit 1
+            fi
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git checkout --theirs --
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git add
+            set +e; GIT_EDITOR=true git rebase --continue; EXIT=$?; set -e
+          done
+
+      - name: Check for release changes
+        id: check_releases
+        run: |
+          CHANGED=$(git diff --diff-filter=A --name-only $PRE_SYNC HEAD -- releases/)
+          if [ -n "$CHANGED" ]; then
+            echo "has_release_changes=true" >> $GITHUB_OUTPUT
+            LATEST=$(echo "$CHANGED" | sort | tail -1 | xargs basename)
+            echo "release_name=$LATEST" >> $GITHUB_OUTPUT
+            echo "Release changes detected: $LATEST"
+          else
+            echo "has_release_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push
+        run: git push origin master --force-with-lease
+
+      - name: Trigger build
+        if: steps.check_releases.outputs.has_release_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-feature.yml -R ${{ github.repository }} --ref master -f release_name="${{ steps.check_releases.outputs.release_name }}"
+
+      - name: Update distribution database
+        if: steps.check_releases.outputs.has_release_changes != 'true'
+        run: |
+          BRANCH="master"
+          DB_BRANCH="db/${BRANCH}"
+          LATEST_RELEASE=$(ls -1 releases/MiSTer_* 2>/dev/null | sort | tail -1)
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "No releases found, skipping db update"
+            exit 0
+          fi
+          RELEASE_NAME=$(basename "$LATEST_RELEASE")
+          HASH=$(md5sum "$LATEST_RELEASE" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$LATEST_RELEASE")
+          TIMESTAMP=$(date +%s)
+          BINARY_URL="https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH}/releases/${RELEASE_NAME}"
+          UPSTREAM_DB_URL="https://raw.githubusercontent.com/MiSTer-devel/Distribution_MiSTer/main/db.json.zip"
+
+          curl -sL "$UPSTREAM_DB_URL" -o /tmp/upstream_db.zip
+          cd /tmp && unzip -o upstream_db.zip && cd -
+
+          python3 -c "
+          import json
+          with open('/tmp/db.json') as f:
+              db = json.load(f)
+          db['timestamp'] = ${TIMESTAMP}
+          db['files']['MiSTer'] = {
+              'hash': '${HASH}',
+              'size': ${SIZE},
+              'url': '${BINARY_URL}',
+              'path': 'system',
+              'reboot': True,
+              'tags': db['files'].get('MiSTer', {}).get('tags', []),
+              'backup': '.MiSTer.old',
+              'tmp': 'MiSTer.new'
+          }
+          with open('/tmp/db.json', 'w') as f:
+              json.dump(db, f, separators=(',', ':'))
+          "
+
+          cd /tmp && zip -9 db.json.zip db.json && cd -
+
+          git checkout --orphan "${DB_BRANCH}" 2>/dev/null || git checkout "${DB_BRANCH}" 2>/dev/null || git checkout --orphan "${DB_BRANCH}"
+          git rm -rf . 2>/dev/null || true
+          cp /tmp/db.json.zip .
+          git add db.json.zip
+          git commit -m "Update database for ${BRANCH}"
+          git push origin "${DB_BRANCH}" --force
+          git checkout "${BRANCH}"
+
+  sync-db9:
+    runs-on: ubuntu-latest
+    outputs:
+      has_release_changes: ${{ steps.check_releases.outputs.has_release_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: db9
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream-db9 https://github.com/MiSTer-DB9/Main_MiSTer.git
+          git fetch upstream-db9 master
+
+      - name: Save pre-sync HEAD
+        run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Rebase on upstream
+        run: |
+          set +e; git rebase upstream-db9/master; EXIT=$?; set -e
+          while [ $EXIT -ne 0 ]; do
+            UNMERGED=$(git diff --name-only --diff-filter=U)
+            NON_RELEASE=$(echo "$UNMERGED" | grep -v '^releases/' | grep -v '^$' || true)
+            if [ -n "$NON_RELEASE" ]; then
+              echo "::error::Rebase conflict requires manual intervention: $NON_RELEASE"
+              git rebase --abort; exit 1
+            fi
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git checkout --theirs --
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git add
+            set +e; GIT_EDITOR=true git rebase --continue; EXIT=$?; set -e
+          done
+
+      - name: Check for release changes
+        id: check_releases
+        run: |
+          CHANGED=$(git diff --diff-filter=A --name-only $PRE_SYNC HEAD -- releases/)
+          if [ -n "$CHANGED" ]; then
+            echo "has_release_changes=true" >> $GITHUB_OUTPUT
+            LATEST=$(echo "$CHANGED" | sort | tail -1 | xargs basename)
+            echo "release_name=$LATEST" >> $GITHUB_OUTPUT
+            echo "Release changes detected: $LATEST"
+          else
+            echo "has_release_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push
+        run: git push origin db9 --force-with-lease
+
+      - name: Trigger build
+        if: steps.check_releases.outputs.has_release_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-feature.yml -R ${{ github.repository }} --ref db9 -f release_name="${{ steps.check_releases.outputs.release_name }}"
+
+      - name: Update distribution database
+        if: steps.check_releases.outputs.has_release_changes != 'true'
+        run: |
+          BRANCH="db9"
+          DB_BRANCH="db/${BRANCH}"
+          LATEST_RELEASE=$(ls -1 releases/MiSTer_* 2>/dev/null | sort | tail -1)
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "No releases found, skipping db update"
+            exit 0
+          fi
+          RELEASE_NAME=$(basename "$LATEST_RELEASE")
+          HASH=$(md5sum "$LATEST_RELEASE" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$LATEST_RELEASE")
+          TIMESTAMP=$(date +%s)
+          BINARY_URL="https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH}/releases/${RELEASE_NAME}"
+          UPSTREAM_DB_URL="https://raw.githubusercontent.com/MiSTer-DB9/Distribution_MiSTer/main/dbencc.json.zip"
+
+          curl -sL "$UPSTREAM_DB_URL" -o /tmp/upstream_db.zip
+          cd /tmp && unzip -o upstream_db.zip && cd -
+
+          python3 -c "
+          import json
+          with open('/tmp/dbencc.json') as f:
+              db = json.load(f)
+          db['timestamp'] = ${TIMESTAMP}
+          db['files']['MiSTer'] = {
+              'hash': '${HASH}',
+              'size': ${SIZE},
+              'url': '${BINARY_URL}',
+              'path': 'system',
+              'reboot': True,
+              'tags': db['files'].get('MiSTer', {}).get('tags', []),
+              'backup': '.MiSTer.old',
+              'tmp': 'MiSTer.new'
+          }
+          with open('/tmp/db.json', 'w') as f:
+              json.dump(db, f, separators=(',', ':'))
+          "
+
+          cd /tmp && zip -9 db.json.zip db.json && cd -
+
+          git checkout --orphan "${DB_BRANCH}" 2>/dev/null || git checkout "${DB_BRANCH}" 2>/dev/null || git checkout --orphan "${DB_BRANCH}"
+          git rm -rf . 2>/dev/null || true
+          cp /tmp/db.json.zip .
+          git add db.json.zip
+          git commit -m "Update database for ${BRANCH}"
+          git push origin "${DB_BRANCH}" --force
+          git checkout "${BRANCH}"
+
+  sync-aitorgomez:
+    runs-on: ubuntu-latest
+    outputs:
+      has_release_changes: ${{ steps.check_releases.outputs.has_release_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: aitorgomez
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream-spark2k06 https://github.com/spark2k06/Main_MiSTer.git
+          git fetch upstream-spark2k06 master
+
+      - name: Save pre-sync HEAD
+        run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Rebase on upstream
+        run: |
+          set +e; git rebase upstream-spark2k06/master; EXIT=$?; set -e
+          while [ $EXIT -ne 0 ]; do
+            UNMERGED=$(git diff --name-only --diff-filter=U)
+            NON_RELEASE=$(echo "$UNMERGED" | grep -v '^releases/' | grep -v '^$' || true)
+            if [ -n "$NON_RELEASE" ]; then
+              echo "::error::Rebase conflict requires manual intervention: $NON_RELEASE"
+              git rebase --abort; exit 1
+            fi
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git checkout --theirs --
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git add
+            set +e; GIT_EDITOR=true git rebase --continue; EXIT=$?; set -e
+          done
+
+      - name: Check for release changes
+        id: check_releases
+        run: |
+          CHANGED=$(git diff --diff-filter=A --name-only $PRE_SYNC HEAD -- releases/)
+          if [ -n "$CHANGED" ]; then
+            echo "has_release_changes=true" >> $GITHUB_OUTPUT
+            LATEST=$(echo "$CHANGED" | sort | tail -1 | xargs basename)
+            echo "release_name=$LATEST" >> $GITHUB_OUTPUT
+            echo "Release changes detected: $LATEST"
+          else
+            echo "has_release_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push
+        run: git push origin aitorgomez --force-with-lease
+
+      - name: Trigger build
+        if: steps.check_releases.outputs.has_release_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-feature.yml -R ${{ github.repository }} --ref aitorgomez -f release_name="${{ steps.check_releases.outputs.release_name }}"
+
+      - name: Update distribution database
+        if: steps.check_releases.outputs.has_release_changes != 'true'
+        run: |
+          BRANCH="aitorgomez"
+          DB_BRANCH="db/${BRANCH}"
+          LATEST_RELEASE=$(ls -1 releases/MiSTer_* 2>/dev/null | sort | tail -1)
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "No releases found, skipping db update"
+            exit 0
+          fi
+          RELEASE_NAME=$(basename "$LATEST_RELEASE")
+          HASH=$(md5sum "$LATEST_RELEASE" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$LATEST_RELEASE")
+          TIMESTAMP=$(date +%s)
+          BINARY_URL="https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH}/releases/${RELEASE_NAME}"
+          UPSTREAM_DB_URL="https://raw.githubusercontent.com/MiSTer-devel/Distribution_MiSTer/main/db.json.zip"
+
+          curl -sL "$UPSTREAM_DB_URL" -o /tmp/upstream_db.zip
+          cd /tmp && unzip -o upstream_db.zip && cd -
+
+          python3 -c "
+          import json
+          with open('/tmp/db.json') as f:
+              db = json.load(f)
+          db['timestamp'] = ${TIMESTAMP}
+          db['files']['MiSTer'] = {
+              'hash': '${HASH}',
+              'size': ${SIZE},
+              'url': '${BINARY_URL}',
+              'path': 'system',
+              'reboot': True,
+              'tags': db['files'].get('MiSTer', {}).get('tags', []),
+              'backup': '.MiSTer.old',
+              'tmp': 'MiSTer.new'
+          }
+          with open('/tmp/db.json', 'w') as f:
+              json.dump(db, f, separators=(',', ':'))
+          "
+
+          cd /tmp && zip -9 db.json.zip db.json && cd -
+
+          git checkout --orphan "${DB_BRANCH}" 2>/dev/null || git checkout "${DB_BRANCH}" 2>/dev/null || git checkout --orphan "${DB_BRANCH}"
+          git rm -rf . 2>/dev/null || true
+          cp /tmp/db.json.zip .
+          git add db.json.zip
+          git commit -m "Update database for ${BRANCH}"
+          git push origin "${DB_BRANCH}" --force
+          git checkout "${BRANCH}"
+
+  sync-full:
+    runs-on: ubuntu-latest
+    needs: [sync-db9, sync-aitorgomez]
+    if: always() && !cancelled()
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: full
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstreams
+        run: |
+          git remote add upstream-db9 https://github.com/MiSTer-DB9/Main_MiSTer.git
+          git remote add upstream-spark2k06 https://github.com/spark2k06/Main_MiSTer.git
+          git fetch upstream-db9 master
+          git fetch upstream-spark2k06 master
+
+      - name: Save pre-sync HEAD
+        run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Merge MiSTer-DB9
+        run: |
+          if ! git merge upstream-db9/master --no-edit; then
+            UNMERGED=$(git ls-files -u | awk '{print $4}' | sort -u)
+            NON_RELEASE=$(echo "$UNMERGED" | grep -v '^releases/' | grep -v '^README\.md$' | grep -v '^\.github/FUNDING\.yml$' | grep -v '^$' || true)
+            if [ -n "$NON_RELEASE" ]; then
+              echo "::error::Merge conflict with MiSTer-DB9 - manual intervention required"
+              git merge --abort; exit 1
+            fi
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git checkout --ours --
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git add
+            if echo "$UNMERGED" | grep -q '^README\.md$'; then
+              git checkout --ours -- README.md
+              git add README.md
+            fi
+            if echo "$UNMERGED" | grep -q '^\.github/FUNDING\.yml$'; then
+              git rm .github/FUNDING.yml 2>/dev/null || true
+            fi
+            git commit --no-edit
+          fi
+
+      - name: Merge spark2k06
+        run: |
+          if ! git merge upstream-spark2k06/master --no-edit; then
+            UNMERGED=$(git ls-files -u | awk '{print $4}' | sort -u)
+            NON_RELEASE=$(echo "$UNMERGED" | grep -v '^releases/' | grep -v '^README\.md$' | grep -v '^\.github/FUNDING\.yml$' | grep -v '^$' || true)
+            if [ -n "$NON_RELEASE" ]; then
+              echo "::error::Merge conflict with spark2k06 - manual intervention required"
+              git merge --abort; exit 1
+            fi
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git checkout --ours --
+            echo "$UNMERGED" | grep '^releases/' | xargs -r git add
+            if echo "$UNMERGED" | grep -q '^README\.md$'; then
+              git checkout --ours -- README.md
+              git add README.md
+            fi
+            if echo "$UNMERGED" | grep -q '^\.github/FUNDING\.yml$'; then
+              git rm .github/FUNDING.yml 2>/dev/null || true
+            fi
+            git commit --no-edit
+          fi
+
+      - name: Restore own files
+        run: |
+          CHANGED=0
+          for f in README.md .github/FUNDING.yml; do
+            if ! git diff --quiet $PRE_SYNC HEAD -- "$f"; then
+              if git cat-file -e $PRE_SYNC:"$f" 2>/dev/null; then
+                git checkout $PRE_SYNC -- "$f"
+                git add "$f"
+              else
+                git rm --ignore-unmatch "$f"
+              fi
+              CHANGED=1
+            fi
+          done
+          [ $CHANGED -eq 1 ] && git commit -m "Restore own files from full branch" || true
+
+      - name: Check for release changes
+        id: check_releases
+        run: |
+          CHANGED=$(git diff --diff-filter=A --name-only $PRE_SYNC HEAD -- releases/)
+          if [ -n "$CHANGED" ]; then
+            echo "has_release_changes=true" >> $GITHUB_OUTPUT
+            LATEST=$(echo "$CHANGED" | sort | tail -1 | xargs basename)
+            echo "release_name=$LATEST" >> $GITHUB_OUTPUT
+            echo "Release changes detected: $LATEST"
+          else
+            echo "has_release_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push
+        run: git push origin full
+
+      - name: Trigger build
+        if: steps.check_releases.outputs.has_release_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-feature.yml -R ${{ github.repository }} --ref full -f release_name="${{ steps.check_releases.outputs.release_name }}"
+
+      - name: Update distribution database
+        if: steps.check_releases.outputs.has_release_changes != 'true'
+        run: |
+          BRANCH="full"
+          DB_BRANCH="db/${BRANCH}"
+          LATEST_RELEASE=$(ls -1 releases/MiSTer_* 2>/dev/null | sort | tail -1)
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "No releases found, skipping db update"
+            exit 0
+          fi
+          RELEASE_NAME=$(basename "$LATEST_RELEASE")
+          HASH=$(md5sum "$LATEST_RELEASE" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$LATEST_RELEASE")
+          TIMESTAMP=$(date +%s)
+          BINARY_URL="https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH}/releases/${RELEASE_NAME}"
+          UPSTREAM_DB_URL="https://raw.githubusercontent.com/MiSTer-DB9/Distribution_MiSTer/main/dbencc.json.zip"
+
+          curl -sL "$UPSTREAM_DB_URL" -o /tmp/upstream_db.zip
+          cd /tmp && unzip -o upstream_db.zip && cd -
+
+          python3 -c "
+          import json
+          with open('/tmp/dbencc.json') as f:
+              db = json.load(f)
+          db['timestamp'] = ${TIMESTAMP}
+          db['files']['MiSTer'] = {
+              'hash': '${HASH}',
+              'size': ${SIZE},
+              'url': '${BINARY_URL}',
+              'path': 'system',
+              'reboot': True,
+              'tags': db['files'].get('MiSTer', {}).get('tags', []),
+              'backup': '.MiSTer.old',
+              'tmp': 'MiSTer.new'
+          }
+          with open('/tmp/db.json', 'w') as f:
+              json.dump(db, f, separators=(',', ':'))
+          "
+
+          cd /tmp && zip -9 db.json.zip db.json && cd -
+
+          git checkout --orphan "${DB_BRANCH}" 2>/dev/null || git checkout "${DB_BRANCH}" 2>/dev/null || git checkout --orphan "${DB_BRANCH}"
+          git rm -rf . 2>/dev/null || true
+          cp /tmp/db.json.zip .
+          git add db.json.zip
+          git commit -m "Update database for ${BRANCH}"
+          git push origin "${DB_BRANCH}" --force
+          git checkout "${BRANCH}"
