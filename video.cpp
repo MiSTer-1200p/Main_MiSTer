@@ -32,7 +32,7 @@
 #include "lib/imlib2/Imlib2.h"
 #include "lib/md5/md5.h"
 
-#define FB_SIZE  (1920*1080)
+#define FB_SIZE  (1920*1200)
 #define FB_ADDR  (0x20000000 + (32*1024*1024)) // 512mb + 32mb(Core's fb)
 
 /*
