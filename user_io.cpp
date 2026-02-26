@@ -1338,6 +1338,64 @@ int user_io_get_width()
 	return fio_size;
 }
 
+bool snac_detected = false;
+
+static void user_io_auto_db9()
+{
+	FILE *f = fopen("/tmp/db9_detected", "r");
+	if (!f) return;
+	snac_detected = true;
+
+	char type[8] = {};
+	if (!fgets(type, sizeof(type), f)) { fclose(f); return; }
+	fclose(f);
+
+	// Trim trailing whitespace
+	char *end = type + strlen(type) - 1;
+	while (end > type && isspace((unsigned char)*end)) *end-- = 0;
+
+	for (int i = 2; ; i++)
+	{
+		char *item = user_io_get_confstr(i);
+		if (!item) break;
+		if (!item[0]) continue;
+
+		char label[256];
+		substrcpy(label, item, 1);
+		if (strcmp(label, "UserIO Joystick") != 0 && strcmp(label, "User port") != 0) continue;
+
+		// Strip H/D/h/d and P prefixes to find the O/o character
+		char prefix[256];
+		substrcpy(prefix, item, 0);
+		char *p = prefix;
+		while ((*p == 'H' || *p == 'D' || *p == 'h' || *p == 'd') && strlen(p) >= 2) p += 2;
+		if (*p == 'P') p += 2;
+
+		if (*p != 'O' && *p != 'o') break;
+
+		int ex = (*p == 'o') ? 1 : 0;
+		char *opt = (p[1] == 'X') ? (p + 2) : (p + 1);
+		if (!*opt) break;
+
+		uint32_t cur = user_io_status_get(opt, ex);
+		if (cur != 0) break; // Already set, don't override
+
+		// Find matching option value
+		for (int vi = 2; ; vi++)
+		{
+			char val[256];
+			if (!substrcpy(val, item, vi)) break;
+			if (strstr(val, type))
+			{
+				user_io_status_set(opt, vi - 2, ex);
+				printf("Auto-enabling %s for %s\n", type, label);
+				break;
+			}
+		}
+		break;
+	}
+}
+
 void user_io_init(const char *path, const char *xml)
 {
 	char *name;
@@ -1486,6 +1544,7 @@ void user_io_init(const char *path, const char *xml)
 					memset(cur_status, 0, sizeof(cur_status));
 				}
 
+				if (!is_menu()) user_io_auto_db9();
 				user_io_status_set("[0]", 1);
 			}
 
@@ -2499,6 +2558,89 @@ int user_io_use_cheats()
 	return use_cheats;
 }
 
+static void user_io_joyraw_check_change()
+{
+	static const uint8_t joyraw_mapping[12] = {
+		KEY_RIGHT,      // 0    R
+		KEY_LEFT,       // 1    L
+		KEY_DOWN,       // 2    D
+		KEY_UP,         // 3    U
+		KEY_ENTER,      // 4    A
+		KEY_ESC,        // 5    B
+		KEY_RESERVED,   // 6    C
+		KEY_TAB,        // 7    X
+		KEY_RESERVED,   // 8    Y
+		KEY_RESERVED,   // 9    Z
+		KEY_RESERVED,   // 10   S
+		KEY_GRAVE       // 11   M
+	};
+	static uint16_t joyraw_bits = 0;
+	static uint16_t joyraw_count = 0;
+
+	// OPTIMIZATION 1: Only check if the counter is ready.
+	// Do not run SPI transactions or logic otherwise.
+	if (joyraw_count++ < 3000) {
+		return;
+	}
+	joyraw_count = 0;
+
+	// --- Start Slow Path (Only runs once every 3000 calls) ---
+
+	spi_uio_cmd_cont(UIO_USERIO_GET);
+	uint16_t joyraw = spi_w(0);
+	DisableIO();
+
+	// OPTIMIZATION 2: Detect changes using XOR.
+	// We mask with 0xFFF because we only care about the first 12 bits.
+	uint16_t changes = (joyraw ^ joyraw_bits) & 0x0FFF;
+
+	// If nothing changed, we are done. No loop, no branches.
+	if (changes == 0) {
+		return;
+	}
+
+	// Save DB9/DB15 detection state on button activity.
+	// Written on every change so it gets re-created if USB/keyboard input clears it.
+	// Works in any core (not just the menu) so the file stays current even when
+	// navigating from a game core into another core without passing through the menu.
+	{
+		const char *type = NULL;
+		if (joyraw & 0x2000) type = "DB9";        // DB9 (bit 13)
+		else if (joyraw & 0x1000) type = "DB15";  // DB15 (bit 12)
+
+		if (type)
+		{
+			FILE *f = fopen("/tmp/db9_detected", "w");
+			if (f)
+			{
+				fprintf(f, "%s", type);
+				fclose(f);
+				snac_detected = true;
+			}
+		}
+	}
+
+	// OPTIMIZATION 3: Iterate only over changed bits.
+	// This turns the O(12) loop into O(N), where N is the number of buttons changing.
+	// Usually N=1 or N=0.
+	while (changes) {
+		// __builtin_ctz finds the index of the first set bit (0-15) instantly
+		int i = __builtin_ctz(changes);
+
+		// Determine if this was a Press (1) or Release (0)
+		// We check the *current* joyraw state at that bit index
+		int is_pressed = (joyraw >> i) & 1;
+
+		user_io_kbd(joyraw_mapping[i], is_pressed);
+
+		// Clear the lowest set bit so we can find the next one
+		changes &= changes - 1;
+	}
+
+	// Update history
+	joyraw_bits = joyraw;
+}
+
 static void check_status_change()
 {
 	static u_int8_t last_status_change = 0;
@@ -3029,6 +3171,7 @@ void user_io_poll()
 	}
 
 	user_io_send_buttons(0);
+	user_io_joyraw_check_change();
 
 	if (is_minimig())
 	{

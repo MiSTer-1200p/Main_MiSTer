@@ -21,6 +21,8 @@
 
 // 0x08 - 0x0F - core specific
 
+#define UIO_USERIO_GET  0x0f
+
 #define UIO_JOYSTICK2   0x10  // also used by minimig and 8 bit
 #define UIO_JOYSTICK3   0x11  // -"-
 #define UIO_JOYSTICK4   0x12  // -"-
@@ -260,6 +262,10 @@ uint32_t ValidateUARTbaud(int mode, uint32_t baud);
 char * GetMidiLinkSoundfont();
 void user_io_store_filename(char *filename);
 int user_io_use_cheats();
+
+// Set when a DB9/DB15 controller is detected, cleared on keyboard/USB input.
+// Used as a guard so input_cb avoids a remove() syscall when the file doesn't exist.
+extern bool snac_detected;
 
 int process_ss(const char *rom_name, int enable = 1);
 
