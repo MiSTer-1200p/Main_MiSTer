@@ -26,6 +26,7 @@
 #include "str_util.h"
 #include "profiling.h"
 #include "offload.h"
+#include "zaparoo.h"
 
 #include "support.h"
 #include "support/arcade/mra_loader.h"
@@ -64,10 +65,10 @@ static int     use_freesync_spd = 0;
 static uint8_t vrr_min_fr = 0;
 static uint8_t vrr_max_fr = 0;
 
-static volatile uint32_t *fb_base = 0;
+volatile uint32_t *fb_base = 0;
 static int fb_enabled = 0;
-static int fb_width = 0;
-static int fb_height = 0;
+int fb_width = 0;
+int fb_height = 0;
 static int fb_num = 0;
 static int brd_x = 0;
 static int brd_y = 0;
@@ -3142,7 +3143,7 @@ static void fb_write_module_params()
 	});
 }
 
-void video_fb_enable(int enable, int n)
+void video_fb_enable(int enable, int n, int loader)
 {
 	PROFILE_FUNCTION();
 
@@ -3156,6 +3157,7 @@ void video_fb_enable(int enable, int n)
 				enable = 1;
 				n = menu_bgn;
 			}
+			else enable = loader ? loader : enable;
 
 			if (enable)
 			{
@@ -3669,6 +3671,8 @@ void video_menu_bg(int n, int idle)
 				draw_black();
 				break;
 			}
+
+			if (idle > 0) zaparoo_waiting(menu_bgn, bg1, bg2);
 		}
 
 		if (cfg.logo && logo && !idle)

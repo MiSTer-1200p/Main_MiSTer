@@ -64,6 +64,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "bootcore.h"
 #include "ide.h"
 #include "profiling.h"
+#include "zaparoo.h"
+#include "loadscreen.h"
 
 /*menu states*/
 enum MENU
@@ -218,6 +220,7 @@ static int32_t  bt_timer = 0;
 static bool osd_unlocked = 1;
 static char osd_code_entry[32];
 static uint32_t osd_lock_timer = 0;
+int loader_bg = 1;
 
 
 extern const char *version;
@@ -377,6 +380,30 @@ static int changeDir(char *dir)
 static const char *home_dir = NULL;
 static char filter[256] = {};
 static unsigned long filter_typing_timer = 0;
+
+static bool loader_bg_initialized = false;
+
+void init_loader_bg_early()
+{
+    if (loader_bg_initialized) return;
+    
+    const char* fname = "loader.png";
+    if (!FileExists(fname))
+    {
+        fname = "loader.jpg";
+        if (!FileExists(fname)) 
+        {
+            loader_bg = 1; // Keep default value if no loader image exists
+            loader_bg_initialized = true;
+            return;
+        }
+    }
+    
+    // File exists, so set loader_bg to 0 early
+    loader_bg = 0;
+    loader_bg_initialized = true;
+    printf("loader_bg [EARLY INIT] -> %d\n", loader_bg);
+}
 
 // this function displays file selection menu
 void SelectFile(const char* path, const char* pFileExt, int Options, unsigned char MenuSelect, unsigned char MenuCancel)
@@ -662,6 +689,12 @@ static void printSysInfo()
 		OsdWrite(n++, info_top, 0, 0);
 
 		int j = 0;
+		if (zaparoo)
+		{
+			sprintf(str, "\x05 %s", zaparoo);
+			infowrite(n++, str);
+			j++;
+		}
 		char *net;
 		net = getNet(1);
 		if (net)
@@ -1023,6 +1056,31 @@ void HandleUI(void)
 		case 0:
 			if (CheckTimer(mgl->timer))
 			{
+				if (mgl->item[mgl->current].action == MGL_ACTION_FADE_IN)
+				{
+					if (mgl->item[mgl->current].mute)
+						set_volume(0x81, 1);
+					else
+						set_volume(0x80, 1);
+
+					fade_in_screen(mgl->item[mgl->current].path, mgl->item[mgl->current].logo);
+					mgl->state = 3;
+				}
+				else if (mgl->item[mgl->current].action == MGL_ACTION_X86_LAUNCHER)
+				{
+					x86_set_appid(mgl->item[mgl->current].x86_appid);
+					mgl->state = 3;
+				}
+				else if (mgl->item[mgl->current].action == MGL_ACTION_FADE_OUT)
+				{					
+					fade_out_screen();
+					if (mgl->item[mgl->current].mute)
+						set_volume(0x81, 1);
+					else
+						set_volume(0x80, 1);
+					mgl->state = 3;
+				}
+				else
 				mgl->state = (mgl->item[mgl->current].action == MGL_ACTION_LOAD) ? 1 : 4;
 			}
 			break;
@@ -1079,6 +1137,7 @@ void HandleUI(void)
 		static int menu_visible = 1;
 		static unsigned long timeout = 0;
 		static unsigned long off_timeout = 0;
+		static unsigned long zaparoo_xchg = 0;
 		if (!video_fb_state() && cfg.fb_terminal)
 		{
 			if (timeout && CheckTimer(timeout))
@@ -1088,6 +1147,7 @@ void HandleUI(void)
 				{
 					menu_visible = 0;
 					video_menu_bg(user_io_status_get("[3:1]"), 1);
+					zaparoo_xchg = GetTimer(100);
 					OsdMenuCtl(0);
 				}
 				else if (!menu_visible)
@@ -1098,9 +1158,16 @@ void HandleUI(void)
 				}
 			}
 
+			if (zaparoo_xchg && CheckTimer(zaparoo_xchg) && menu_visible <= 0)
+			{
+				video_menu_bg(user_io_status_get("[3:1]"), (menu_visible == 0) ? 1 : 2);
+				zaparoo_xchg = GetTimer(100);
+			}
+
 			if (off_timeout && CheckTimer(off_timeout) && menu_visible < 0)
 			{
 				off_timeout = 0;
+				zaparoo_xchg = 0;
 				video_menu_bg(user_io_status_get("[3:1]"), 3);
 				if (cfg.video_off_hdmi) video_hdmi_power(0);
 			}
@@ -1347,6 +1414,7 @@ void HandleUI(void)
 	switch (menustate)
 	{
 	case MENU_NONE1:
+		init_loader_bg_early();
 	case MENU_NONE2:
 	case MENU_INFO:
 		break;
@@ -2421,6 +2489,7 @@ void HandleUI(void)
 
 			if (selPath[0])
 			{
+				if (loader_bg != -1 && !mgl->done) fade_in_screen(selPath, NULL);
 
 				char idx = user_io_ext_idx(selPath, fs_pFileExt) << 6 | ioctl_index;
 				if (addon[0] == 'f' && addon[1] != '1') process_addon(addon, idx);
@@ -2456,6 +2525,14 @@ void HandleUI(void)
 				}
 
 				if (addon[0] == 'f' && addon[1] == '1') process_addon(addon, idx);
+
+				if (loader_bg != -1 && !mgl->done)
+				{
+					if (!loader_bg)
+						fade_out_screen();
+					else					
+						video_fb_enable(0);
+				}		
 			}
 
 			mgl->state = 3;
@@ -6423,7 +6500,8 @@ void HandleUI(void)
 		OsdSetTitle("System Settings", OSD_ARROW_LEFT);
 		menumask = 0x7F;
 
-		OsdWrite(m++);
+		sprintf(s, "   *** AITORGOMEZ FORK ***");
+		OsdWrite(m++, s);
 		sprintf(s, "       MiSTer v%s", version + 5);
 		{
 			char str[8] = {};
@@ -7059,6 +7137,8 @@ void HandleUI(void)
 				}
 
 				int n = 8;
+				getZaparoo();
+				if (zaparoo) str[n++] = 5;				
 				if (getNet(2)) str[n++] = 0x1d;
 				if (getNet(1)) str[n++] = 0x1c;
 				if (hci_get_route(0) >= 0) str[n++] = 4;
@@ -7425,6 +7505,6 @@ void ProgressMessage(const char* title, const char* text, int current, int max)
 		for (int i = 0; i <= new_progress; i++) buf[i] = (i < new_progress) ? 0x7F : c;
 		buf[PROGRESS_CNT] = 0;
 
-		InfoMessage(progress_buf, 2000, title);
+		if (loader_bg) InfoMessage(progress_buf, 2000, title);
 	}
 }
