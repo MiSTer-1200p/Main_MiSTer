@@ -2617,16 +2617,12 @@ static void user_io_joyraw_check_change()
 		KEY_GRAVE       // 11   M
 	};
 	static uint16_t joyraw_bits = 0;
-	static uint16_t joyraw_count = 0;
+	static uint32_t joyraw_timer = 0;
 
-	// OPTIMIZATION 1: Only check if the counter is ready.
-	// Do not run SPI transactions or logic otherwise.
-	if (joyraw_count++ < 3000) {
-		return;
-	}
-	joyraw_count = 0;
-
-	// --- Start Slow Path (Only runs once every 3000 calls) ---
+	// OPTIMIZATION 1: Only poll SPI on a fixed time interval (~20Hz).
+	// Uses a timer instead of a counter so the rate is independent of main loop speed.
+	if (joyraw_timer && !CheckTimer(joyraw_timer)) return;
+	joyraw_timer = GetTimer(50);
 
 	spi_uio_cmd_cont(UIO_USERIO_GET);
 	uint16_t joyraw = spi_w(0);
@@ -2642,23 +2638,23 @@ static void user_io_joyraw_check_change()
 	}
 
 	// Save DB9/DB15 detection state on button activity.
-	// Written on every change so it gets re-created if USB/keyboard input clears it.
+	// Only re-written when the type changes or the file was cleared by USB/keyboard input.
 	// Works in any core (not just the menu) so the file stays current even when
 	// navigating from a game core into another core without passing through the menu.
-	{
-		const char *type = NULL;
-		if (joyraw & 0x2000) type = "DB9";        // DB9 (bit 13)
-		else if (joyraw & 0x1000) type = "DB15";  // DB15 (bit 12)
+	static const char *last_type = NULL;
+	const char *type = NULL;
+	if (joyraw & 0x2000) type = "DB9";        // DB9 (bit 13)
+	else if (joyraw & 0x1000) type = "DB15";  // DB15 (bit 12)
 
-		if (type)
+	if (type && (!snac_detected || type != last_type))
+	{
+		FILE *f = fopen("/tmp/db9_detected", "w");
+		if (f)
 		{
-			FILE *f = fopen("/tmp/db9_detected", "w");
-			if (f)
-			{
-				fprintf(f, "%s", type);
-				fclose(f);
-				snac_detected = true;
-			}
+			fprintf(f, "%s", type);
+			fclose(f);
+			snac_detected = true;
+			last_type = type;
 		}
 	}
 
@@ -2673,7 +2669,7 @@ static void user_io_joyraw_check_change()
 		// We check the *current* joyraw state at that bit index
 		int is_pressed = (joyraw >> i) & 1;
 
-		user_io_kbd(joyraw_mapping[i], is_pressed);
+		input_joyraw_kbd(joyraw_mapping[i], is_pressed);
 
 		// Clear the lowest set bit so we can find the next one
 		changes &= changes - 1;
