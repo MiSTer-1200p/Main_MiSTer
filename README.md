@@ -1,9 +1,12 @@
-# Main_MiSTer Main Binary and Wiki Repo
+# MiSTer 1920x1200 Fork - DB9/SNAC8 variant
 
-This repo serves as the home for the MiSTer Main binaries and the Wiki.
+Based on [MiSTer-DB9/Main_MiSTer](https://github.com/MiSTer-DB9/Main_MiSTer) with 1920x1200 framebuffer support.
 
-For the purposes of getting google to crawl the wiki, here's a link to the (not for humans) [crawlable wiki](https://github-wiki-see.page/m/MiSTer-devel/Wiki_MiSTer/wiki)
+See the [main branch](https://github.com/MiSTer-1200p/Main_MiSTer/tree/master) for full documentation.
 
-If you're a human looking for the wiki, that's [here](https://github.com/MiSTer-devel/Wiki_MiSTer/wiki)
+## Installation
 
-To compile this application, read more about that [here](https://mister-devel.github.io/MkDocs_MiSTer/developer/mistercompile/#general-prerequisites-for-arm-cross-compiling)
+```ini
+[distribution_mister]
+db_url = https://raw.githubusercontent.com/MiSTer-1200p/Main_MiSTer/db/db9/db.json.zip
+```
