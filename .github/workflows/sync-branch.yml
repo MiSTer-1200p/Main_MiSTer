@@ -1,0 +1,238 @@
+name: Sync Branch from Upstream
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+      upstream_repo:
+        required: true
+        type: string
+      upstream_ref:
+        required: true
+        type: string
+      upstream_db_url:
+        required: true
+        type: string
+      upstream_db_name:
+        required: true
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      has_release_changes: ${{ steps.check_releases.outputs.has_release_changes }}
+      release_name: ${{ steps.check_releases.outputs.release_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream ${{ inputs.upstream_repo }}
+          git fetch upstream ${{ inputs.upstream_ref }}
+
+      - name: Save pre-sync HEAD
+        run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Rebase on upstream
+        run: |
+          resolve_rebase_conflicts() {
+            local unmerged
+            local non_auto
+            local path
+
+            unmerged=$(git diff --name-only --diff-filter=U)
+            if [ -z "$unmerged" ]; then
+              echo "::error::Rebase failed without resolvable release/.github conflicts"
+              return 1
+            fi
+
+            non_auto=$(printf '%s\n' "$unmerged" | grep -v '^releases/' | grep -v '^\.github/' | grep -v '^$' || true)
+            if [ -n "$non_auto" ]; then
+              echo "::error::Rebase conflict requires manual intervention: $non_auto"
+              return 1
+            fi
+
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              case "$path" in
+                releases/*)
+                  if git checkout --theirs -- "$path" 2>/dev/null; then
+                    git add "$path"
+                  else
+                    git rm --ignore-unmatch -q -- "$path"
+                  fi
+                  ;;
+                .github/*)
+                  git rm --ignore-unmatch -q -- "$path"
+                  ;;
+              esac
+            done <<<"$unmerged"
+          }
+
+          set +e; git rebase upstream/${{ inputs.upstream_ref }}; EXIT=$?; set -e
+          while [ $EXIT -ne 0 ]; do
+            if ! resolve_rebase_conflicts; then
+              git rebase --abort; exit 1
+            fi
+            set +e; GIT_EDITOR=true git rebase --continue; EXIT=$?; set -e
+          done
+
+      - name: Restore .github
+        run: |
+          restore_github_tree() {
+            local ref="$1"
+            local changed
+            local path
+
+            changed=$(git diff --no-renames --name-only "$ref" HEAD -- .github/ || true)
+            [ -n "$changed" ] || return 0
+
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              if git cat-file -e "$ref:$path" 2>/dev/null; then
+                git checkout "$ref" -- "$path"
+                git add "$path"
+              else
+                git rm --ignore-unmatch -q -- "$path"
+              fi
+            done <<<"$changed"
+
+            if ! git diff --cached --quiet -- .github/; then
+              git commit -m "Restore .github from pre-sync state"
+            fi
+          }
+
+          restore_build_feature_only() {
+            local ref="$1"
+            local build_feature=".github/workflows/build-feature.yml"
+            local tracked
+            local path
+
+            if ! git cat-file -e "$ref:$build_feature" 2>/dev/null; then
+              echo "::error::Pre-sync branch is missing $build_feature"
+              return 1
+            fi
+
+            git checkout "$ref" -- "$build_feature"
+            git add "$build_feature"
+
+            tracked=$(git ls-files .github)
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              if [ "$path" != "$build_feature" ]; then
+                git rm --ignore-unmatch -q -- "$path"
+              fi
+            done <<<"$tracked"
+
+            if ! git diff --cached --quiet -- .github/; then
+              git commit -m "Restrict .github to build-feature.yml"
+            fi
+          }
+
+          if [ "${{ inputs.branch }}" = "master" ]; then
+            restore_github_tree "$PRE_SYNC"
+          else
+            restore_build_feature_only "$PRE_SYNC"
+          fi
+
+      - name: Check for release changes
+        id: check_releases
+        run: |
+          CHANGED=$(git diff --no-renames --diff-filter=A --name-only $PRE_SYNC HEAD -- releases/)
+          if [ -n "$CHANGED" ]; then
+            echo "has_release_changes=true" >> $GITHUB_OUTPUT
+            LATEST=$(echo "$CHANGED" | sort | tail -1 | xargs basename)
+            echo "release_name=$LATEST" >> $GITHUB_OUTPUT
+            echo "Release changes detected: $LATEST"
+          else
+            echo "has_release_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Restore releases
+        run: |
+          if ! git diff --quiet $PRE_SYNC HEAD -- releases/; then
+            git diff --no-renames --name-only $PRE_SYNC HEAD -- releases/ | while read -r f; do
+              [ -n "$f" ] || continue
+              if git cat-file -e "$PRE_SYNC:$f" 2>/dev/null; then
+                git checkout "$PRE_SYNC" -- "$f"
+              else
+                git rm --ignore-unmatch -q "$f"
+              fi
+            done
+            git add releases/ 2>/dev/null || true
+            if ! git diff --cached --quiet -- releases/; then
+              git commit -m "Restore releases from pre-sync state"
+            fi
+          fi
+
+      - name: Push
+        run: git push origin ${{ inputs.branch }} --force-with-lease
+
+      - name: Update distribution database
+        if: steps.check_releases.outputs.has_release_changes != 'true'
+        run: |
+          BRANCH="${{ inputs.branch }}"
+          DB_BRANCH="db/${BRANCH}"
+          LATEST_RELEASE=$(ls -1 releases/MiSTer_* 2>/dev/null | sort | tail -1)
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "No releases found, skipping db update"
+            exit 0
+          fi
+          RELEASE_NAME=$(basename "$LATEST_RELEASE")
+          HASH=$(md5sum "$LATEST_RELEASE" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$LATEST_RELEASE")
+          TIMESTAMP=$(date +%s)
+          BINARY_URL="https://raw.githubusercontent.com/${{ github.repository }}/${BRANCH}/releases/${RELEASE_NAME}"
+
+          curl -sL "${{ inputs.upstream_db_url }}" -o /tmp/upstream_db.zip
+          cd /tmp && unzip -o upstream_db.zip && cd -
+
+          python3 -c "
+          import json
+          with open('/tmp/${{ inputs.upstream_db_name }}') as f:
+              db = json.load(f)
+          db['timestamp'] = ${TIMESTAMP}
+          db['files']['MiSTer'] = {
+              'hash': '${HASH}',
+              'size': ${SIZE},
+              'url': '${BINARY_URL}',
+              'path': 'system',
+              'reboot': True,
+              'tags': db['files'].get('MiSTer', {}).get('tags', []),
+              'backup': '.MiSTer.old',
+              'tmp': 'MiSTer.new'
+          }
+          with open('/tmp/db.json', 'w') as f:
+              json.dump(db, f, separators=(',', ':'))
+          "
+
+          cd /tmp && zip -9 db.json.zip db.json && cd -
+
+          git checkout --orphan "${DB_BRANCH}" 2>/dev/null || git checkout "${DB_BRANCH}" 2>/dev/null || git checkout --orphan "${DB_BRANCH}"
+          git rm -rf . 2>/dev/null || true
+          cp /tmp/db.json.zip .
+          git add db.json.zip
+          git commit -m "Update database for ${BRANCH}"
+          git push origin "${DB_BRANCH}" --force
+          git checkout "${BRANCH}"
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.has_release_changes == 'true'
+    uses: ./.github/workflows/build-feature.yml
+    with:
+      branch: ${{ inputs.branch }}
+      release_name: ${{ needs.sync.outputs.release_name }}
+    secrets: inherit
