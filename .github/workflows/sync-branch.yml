@@ -18,6 +18,13 @@ on:
       upstream_db_name:
         required: true
         type: string
+    outputs:
+      has_release_changes:
+        description: "Whether release changes were detected"
+        value: ${{ jobs.sync.outputs.has_release_changes }}
+      release_name:
+        description: "The name of the detected release"
+        value: ${{ jobs.sync.outputs.release_name }}
 
 jobs:
   sync:
