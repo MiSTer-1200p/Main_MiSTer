@@ -123,7 +123,7 @@ jobs:
           # ways that cannot be resolved automatically by git merge. These are
           # maintained manually on the full branch and must be preserved after
           # each sync to avoid build failures.
-          for f in README.md cfg.h cfg.cpp menu.cpp user_io.cpp; do
+          for f in README.md cfg.h cfg.cpp menu.cpp user_io.cpp video.h; do
             if ! git diff --quiet $PRE_SYNC HEAD -- "$f"; then
               if git cat-file -e $PRE_SYNC:"$f" 2>/dev/null; then
                 git checkout $PRE_SYNC -- "$f"
