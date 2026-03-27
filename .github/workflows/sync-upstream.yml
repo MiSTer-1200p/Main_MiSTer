@@ -55,33 +55,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch upstreams
-        run: |
-          git remote add upstream-db9 https://github.com/MiSTer-DB9/Main_MiSTer.git
-          git remote add upstream-spark2k06 https://github.com/spark2k06/Main_MiSTer.git
-          git fetch upstream-db9 master
-          git fetch upstream-spark2k06 master
+      - name: Fetch synced branches
+        run: git fetch origin master db9 aitorgomez
 
       - name: Save pre-sync HEAD
         run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
-      - name: Merge MiSTer-DB9
+      - name: Rebuild full from synced branches
         run: |
-          resolve_ignored_conflicts() {
+          resolve_conflicts() {
             local label="$1"
             local unmerged
-            local non_ignored
-            local path
 
             unmerged=$(git diff --name-only --diff-filter=U)
             if [ -z "$unmerged" ]; then
-              echo "::error::${label}: merge failed without resolvable .github/releases conflicts"
-              return 1
-            fi
-
-            non_ignored=$(printf '%s\n' "$unmerged" | grep -v '^\.github/' | grep -v '^releases/' | grep -v '^$' || true)
-            if [ -n "$non_ignored" ]; then
-              echo "::error::${label}: $non_ignored"
+              echo "::error::${label}: merge failed without conflicts to resolve"
               return 1
             fi
 
@@ -91,43 +79,21 @@ jobs:
             done <<<"$unmerged"
           }
 
-          if ! git merge upstream-db9/master --no-edit --allow-unrelated-histories -X theirs; then
-            if ! resolve_ignored_conflicts "Merge with MiSTer-DB9 failed unexpectedly with non-.github/releases conflicts"; then
-              git merge --abort; exit 1
-            fi
+          # Start fresh from master each sync to avoid accumulated-state issues
+          # where a previous merge's conflict resolution masks new upstream changes.
+          git reset --hard origin/master
+
+          # Merge db9 (DB9 joystick/SNAC support). Since db9 is rebased on
+          # master this is usually conflict-free.
+          if ! git merge origin/db9 --no-edit --allow-unrelated-histories; then
+            resolve_conflicts "Merge db9" || { git merge --abort; exit 1; }
             git commit --no-edit
           fi
 
-      - name: Merge spark2k06
-        run: |
-          resolve_ignored_conflicts() {
-            local label="$1"
-            local unmerged
-            local non_ignored
-            local path
-
-            unmerged=$(git diff --name-only --diff-filter=U)
-            if [ -z "$unmerged" ]; then
-              echo "::error::${label}: merge failed without resolvable .github/releases conflicts"
-              return 1
-            fi
-
-            non_ignored=$(printf '%s\n' "$unmerged" | grep -v '^\.github/' | grep -v '^releases/' | grep -v '^$' || true)
-            if [ -n "$non_ignored" ]; then
-              echo "::error::${label}: $non_ignored"
-              return 1
-            fi
-
-            while IFS= read -r path; do
-              [ -n "$path" ] || continue
-              git rm --ignore-unmatch -q -- "$path"
-            done <<<"$unmerged"
-          }
-
-          if ! git merge upstream-spark2k06/master --no-edit --allow-unrelated-histories -X theirs; then
-            if ! resolve_ignored_conflicts "Merge with spark2k06 failed unexpectedly with non-.github/releases conflicts"; then
-              git merge --abort; exit 1
-            fi
+          # Merge aitorgomez LAST with -X theirs so its additions (loadscreen,
+          # zaparoo, cfg fields) win when they conflict with db9 changes.
+          if ! git merge origin/aitorgomez --no-edit --allow-unrelated-histories -X theirs; then
+            resolve_conflicts "Merge aitorgomez" || { git merge --abort; exit 1; }
             git commit --no-edit
           fi
 
@@ -147,7 +113,12 @@ jobs:
       - name: Restore own files
         run: |
           CHANGED=0
-          for f in README.md; do
+
+          # Source files that combine changes from both db9 and aitorgomez in
+          # ways that cannot be resolved automatically by git merge. These are
+          # maintained manually on the full branch and must be preserved after
+          # each sync to avoid build failures.
+          for f in README.md cfg.h cfg.cpp menu.cpp user_io.cpp; do
             if ! git diff --quiet $PRE_SYNC HEAD -- "$f"; then
               if git cat-file -e $PRE_SYNC:"$f" 2>/dev/null; then
                 git checkout $PRE_SYNC -- "$f"
@@ -158,19 +129,22 @@ jobs:
               CHANGED=1
             fi
           done
-          for dir in releases; do
-            if ! git diff --quiet $PRE_SYNC HEAD -- "$dir/"; then
-              git diff --no-renames --name-only $PRE_SYNC HEAD -- "$dir/" | while read -r f; do
-                if git cat-file -e "$PRE_SYNC:$f" 2>/dev/null; then
-                  git checkout "$PRE_SYNC" -- "$f"
-                else
-                  git rm --ignore-unmatch -q "$f"
-                fi
-              done
-              git add "$dir/" 2>/dev/null || true
-              CHANGED=1
-            fi
-          done
+
+          # Restore releases/ to pre-sync state (keep our compiled binaries,
+          # discard upstream binaries that came in via the merge).
+          if ! git diff --quiet $PRE_SYNC HEAD -- releases/; then
+            git diff --no-renames --name-only $PRE_SYNC HEAD -- releases/ | while read -r f; do
+              [ -n "$f" ] || continue
+              if git cat-file -e "$PRE_SYNC:$f" 2>/dev/null; then
+                git checkout "$PRE_SYNC" -- "$f"
+              else
+                git rm --ignore-unmatch -q "$f"
+              fi
+            done
+            git add releases/ 2>/dev/null || true
+            CHANGED=1
+          fi
+
           [ $CHANGED -eq 1 ] && git commit -m "Restore own files from full branch" || true
 
       - name: Restore .github
@@ -205,7 +179,7 @@ jobs:
           restore_build_feature_only "$PRE_SYNC"
 
       - name: Push
-        run: git push origin full
+        run: git push origin full --force-with-lease
 
       - name: Update distribution database
         if: steps.check_releases.outputs.has_release_changes != 'true'
