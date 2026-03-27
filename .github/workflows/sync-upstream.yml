@@ -136,11 +136,31 @@ jobs:
               with open('cfg.cpp', 'w') as f:
                   f.write(c)
               print('cfg.cpp: added aitorgomez INI entries')
+
+          # menu.cpp and user_io.cpp: aitorgomez's function calls get auto-merged
+          # into db9's file, but the #includes conflict and db9 wins, so the
+          # declarations are missing. Add them if the calls are present but the
+          # includes are not.
+          def ensure_include(filename, include, guard):
+              with open(filename) as f:
+                  src = f.read()
+              if guard in src and include not in src:
+                  # Insert after the last #include line in the file header
+                  last = max(src.rfind('\n#include '), src.rfind('\n#include\t'))
+                  end = src.index('\n', last + 1)
+                  src = src[:end] + '\n' + include + src[end:]
+                  with open(filename, 'w') as f:
+                      f.write(src)
+                  print(f'{filename}: added {include}')
+
+          ensure_include('menu.cpp',    '#include "loadscreen.h"', 'fade_in_screen')
+          ensure_include('menu.cpp',    '#include "zaparoo.h"',    'getZaparoo')
+          ensure_include('user_io.cpp', '#include "loadscreen.h"', 'load_screen_bg')
           EOF
 
-          git add cfg.h cfg.cpp
+          git add cfg.h cfg.cpp menu.cpp user_io.cpp
           if ! git diff --cached --quiet; then
-            git commit -m "Add aitorgomez cfg fields not auto-merged from db9 conflict"
+            git commit -m "Add aitorgomez declarations not auto-merged from db9 conflict"
           fi
 
       - name: Check for release changes
