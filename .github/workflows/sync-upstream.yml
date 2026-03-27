@@ -90,9 +90,14 @@ jobs:
             git commit --no-edit
           fi
 
-          # Merge aitorgomez LAST with -X theirs so its additions (loadscreen,
-          # zaparoo, cfg fields) win when they conflict with db9 changes.
-          if ! git merge origin/aitorgomez --no-edit --allow-unrelated-histories -X theirs; then
+          # Merge aitorgomez with -X ours so master+db9 wins any conflicts.
+          # Aitorgomez's new files (loadscreen.cpp, zaparoo.cpp, etc.) are
+          # always included cleanly since new files never conflict. Files that
+          # aitorgomez modifies but is behind master on (e.g. video.h missing
+          # video_mode_cmd) keep the master/db9 version, preventing build
+          # failures. The "Restore own files" step then overlays the files
+          # where we specifically need aitorgomez content (cfg.h, menu.cpp…).
+          if ! git merge origin/aitorgomez --no-edit --allow-unrelated-histories -X ours; then
             resolve_conflicts "Merge aitorgomez" || { git merge --abort; exit 1; }
             git commit --no-edit
           fi
