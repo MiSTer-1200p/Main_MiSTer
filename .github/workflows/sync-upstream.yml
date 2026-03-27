@@ -79,8 +79,7 @@ jobs:
             done <<<"$unmerged"
           }
 
-          # Start fresh from master each sync to avoid accumulated-state issues
-          # where a previous merge's conflict resolution masks new upstream changes.
+          # Start fresh from master each sync.
           git reset --hard origin/master
 
           # Merge db9 (DB9 joystick/SNAC support). Since db9 is rebased on
@@ -90,16 +89,58 @@ jobs:
             git commit --no-edit
           fi
 
-          # Merge aitorgomez with -X ours so master+db9 wins any conflicts.
-          # Aitorgomez's new files (loadscreen.cpp, zaparoo.cpp, etc.) are
-          # always included cleanly since new files never conflict. Files that
-          # aitorgomez modifies but is behind master on (e.g. video.h missing
-          # video_mode_cmd) keep the master/db9 version, preventing build
-          # failures. The "Restore own files" step then overlays the files
-          # where we specifically need aitorgomez content (cfg.h, menu.cpp…).
+          # Merge aitorgomez with -X ours so master+db9 always wins conflicts.
+          # Aitorgomez's new files (loadscreen.cpp, zaparoo.cpp, etc.) come in
+          # cleanly since new files never conflict. Files that aitorgomez is
+          # behind master on keep the master/db9 version.
           if ! git merge origin/aitorgomez --no-edit --allow-unrelated-histories -X ours; then
             resolve_conflicts "Merge aitorgomez" || { git merge --abort; exit 1; }
             git commit --no-edit
+          fi
+
+      - name: Patch cfg for aitorgomez fields
+        run: |
+          python3 - <<'EOF'
+          import re, sys
+
+          # cfg.h: ensure aitorgomez-specific fields are present before '} cfg_t;'.
+          # These are needed by loadscreen.cpp and zaparoo.cpp but live in the same
+          # struct area as master/db9 changes, so git cannot auto-merge them.
+          with open('cfg.h') as f:
+              h = f.read()
+
+          if 'loading_txt_up' not in h:
+              fields = (
+                  '\tchar loading_txt_up;\n'
+                  '\tchar waiting_txt_up;\n'
+                  '\tchar cfgcore_subfolder[32];\n'
+                  '\tchar cfgarcade_subfolder[32];\n'
+              )
+              h = h.replace('} cfg_t;', fields + '} cfg_t;')
+              with open('cfg.h', 'w') as f:
+                  f.write(h)
+              print('cfg.h: added aitorgomez fields')
+
+          # cfg.cpp: ensure matching INI parsing entries are present.
+          with open('cfg.cpp') as f:
+              c = f.read()
+
+          if 'LOADING_TXT_UP' not in c:
+              entries = (
+                  '\t{ "LOADING_TXT_UP", (void *)(&(cfg.loading_txt_up)), UINT8, 0, 1 },\n'
+                  '\t{ "WAITING_TXT_UP", (void *)(&(cfg.waiting_txt_up)), UINT8, 0, 1 },\n'
+                  '\t{ "CFGCORE_SUBFOLDER", (void*)(&(cfg.cfgcore_subfolder)), STRING, 0, sizeof(cfg.cfgcore_subfolder) - 1 },\n'
+                  '\t{ "CFGARCADE_SUBFOLDER", (void *)(&(cfg.cfgarcade_subfolder)), STRING, 0, sizeof(cfg.cfgarcade_subfolder) - 1 },\n'
+              )
+              c = c.replace('\n};\n\nstatic const int nvars', '\n' + entries + '};\n\nstatic const int nvars', 1)
+              with open('cfg.cpp', 'w') as f:
+                  f.write(c)
+              print('cfg.cpp: added aitorgomez INI entries')
+          EOF
+
+          git add cfg.h cfg.cpp
+          if ! git diff --cached --quiet; then
+            git commit -m "Add aitorgomez cfg fields not auto-merged from db9 conflict"
           fi
 
       - name: Check for release changes
@@ -119,11 +160,7 @@ jobs:
         run: |
           CHANGED=0
 
-          # Source files that combine changes from both db9 and aitorgomez in
-          # ways that cannot be resolved automatically by git merge. These are
-          # maintained manually on the full branch and must be preserved after
-          # each sync to avoid build failures.
-          for f in README.md cfg.h cfg.cpp menu.cpp user_io.cpp video.h; do
+          for f in README.md; do
             if ! git diff --quiet $PRE_SYNC HEAD -- "$f"; then
               if git cat-file -e $PRE_SYNC:"$f" 2>/dev/null; then
                 git checkout $PRE_SYNC -- "$f"
@@ -135,8 +172,6 @@ jobs:
             fi
           done
 
-          # Restore releases/ to pre-sync state (keep our compiled binaries,
-          # discard upstream binaries that came in via the merge).
           if ! git diff --quiet $PRE_SYNC HEAD -- releases/; then
             git diff --no-renames --name-only $PRE_SYNC HEAD -- releases/ | while read -r f; do
               [ -n "$f" ] || continue
