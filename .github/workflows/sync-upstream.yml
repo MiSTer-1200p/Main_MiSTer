@@ -156,6 +156,20 @@ jobs:
           ensure_include('menu.cpp',    '#include "loadscreen.h"', 'fade_in_screen')
           ensure_include('menu.cpp',    '#include "zaparoo.h"',    'getZaparoo')
           ensure_include('user_io.cpp', '#include "loadscreen.h"', 'load_screen_bg')
+
+          # user_io.cpp: db9's err_strings struct uses 'errno' as a field name.
+          # Once <errno.h> is pulled in (e.g. via SNAC8 db9_shm_init logging),
+          # the macro expansion breaks the struct decl. Rename to 'err'.
+          with open('user_io.cpp') as f:
+              src = f.read()
+          old_decl = 'static struct { const char *fmtstr; Imlib_Load_Error errno; } err_strings[] = {'
+          new_decl = 'static struct { const char *fmtstr; Imlib_Load_Error err;   } err_strings[] = {'
+          if old_decl in src:
+              src = src.replace(old_decl, new_decl)
+              src = src.replace('err_strings[i].errno', 'err_strings[i].err')
+              with open('user_io.cpp', 'w') as f:
+                  f.write(src)
+              print('user_io.cpp: renamed err_strings field errno -> err')
           EOF
 
           git add cfg.h cfg.cpp menu.cpp user_io.cpp
