@@ -139,6 +139,10 @@ static const ini_var_t ini_vars[] =
 	{ "SCREENSHOT_IMAGE_FORMAT", (void *)(&(cfg.screenshot_image_format)), STRING, 0, sizeof(cfg.screenshot_image_format) - 1 },
 	{ "HDMI_SPD", (void *)(&(cfg.hdmi_spd)), UINT8, 0, 1 },
 
+	{ "LOADING_TXT_UP", (void *)(&(cfg.loading_txt_up)), UINT8, 0, 1 },
+	{ "WAITING_TXT_UP", (void *)(&(cfg.waiting_txt_up)), UINT8, 0, 1 },
+	{ "CFGCORE_SUBFOLDER", (void*)(&(cfg.cfgcore_subfolder)), STRING, 0, sizeof(cfg.cfgcore_subfolder) - 1 },
+	{ "CFGARCADE_SUBFOLDER", (void *)(&(cfg.cfgarcade_subfolder)), STRING, 0, sizeof(cfg.cfgarcade_subfolder) - 1 },
 };
 
 static const int nvars = (int)(sizeof(ini_vars) / sizeof(ini_var_t));

@@ -107,6 +107,10 @@ typedef struct {
 	char screenshot_image_format[16];
 	uint8_t hdmi_spd;
 
+	char loading_txt_up;
+	char waiting_txt_up;
+	char cfgcore_subfolder[32];
+	char cfgarcade_subfolder[32];
 } cfg_t;
 
 extern cfg_t cfg;
