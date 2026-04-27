@@ -9,10 +9,17 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: POSIX shm + errno for db9_shm_*
+#include <sys/mman.h>
+#include <errno.h>
+// [MiSTer-DB9 END]
 
 #include "hardware.h"
 #include "osd.h"
 #include "user_io.h"
+// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+#include "db9_key.h"
+// [MiSTer-DB9-Pro END]
 #include "debug.h"
 #include "spi.h"
 #include "cfg.h"
@@ -1367,12 +1374,154 @@ int user_io_get_width()
 	return fio_size;
 }
 
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: POSIX shm for DB9/DB15 detection state
+// Replaces /tmp/db9_detected file to avoid blocking filesystem syscalls in the
+// input callback and polling loop hot paths. All read/write/clear operations
+// are plain memory accesses after the initial mmap.
+#define DB9_SHM_NAME "/mister_db9_detected"
+#define DB9_SHM_SIZE 8
+
+static char *db9_shm_ptr = NULL;
+
+void db9_shm_init()
+{
+	if (db9_shm_ptr) return; // already mapped, reuse across core loads
+	int fd = shm_open(DB9_SHM_NAME, O_CREAT | O_RDWR, 0644);
+	if (fd < 0)
+	{
+		printf("db9_shm_init: shm_open(%s) failed: %s\n", DB9_SHM_NAME, strerror(errno));
+		return;
+	}
+	if (ftruncate(fd, DB9_SHM_SIZE) < 0)
+	{
+		printf("db9_shm_init: ftruncate failed: %s\n", strerror(errno));
+	}
+	db9_shm_ptr = (char *)mmap(NULL, DB9_SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	close(fd);
+	if (db9_shm_ptr == MAP_FAILED)
+	{
+		printf("db9_shm_init: mmap failed: %s\n", strerror(errno));
+		db9_shm_ptr = NULL;
+	}
+}
+
+void db9_shm_write(const char *type)
+{
+	if (!db9_shm_ptr || !type) return;
+	// [MiSTer-DB9-Pro BEGIN] - gate: never advertise Saturn while locked
+	if (!db9_key_saturn_unlocked() && !strcmp(type, "Saturn")) return;
+	// [MiSTer-DB9-Pro END]
+	memset(db9_shm_ptr, 0, DB9_SHM_SIZE);
+	strncpy(db9_shm_ptr, type, DB9_SHM_SIZE - 1);
+}
+
+void db9_shm_clear()
+{
+	if (!db9_shm_ptr || !db9_shm_ptr[0]) return; // skip if already clear
+	memset(db9_shm_ptr, 0, DB9_SHM_SIZE);
+}
+
+const char *db9_shm_read()
+{
+	if (!db9_shm_ptr || !db9_shm_ptr[0]) return NULL;
+	return db9_shm_ptr;
+}
+
+// [MiSTer-DB9-Pro BEGIN] - Saturn-locked alert flag
+// Set by user_io_joyraw_check_change() while a Saturn pad is detected and
+// db9pro.key is missing/invalid. Read by the Menu core status bar.
+static int saturn_locked_state = 0;
+int db9_saturn_locked_alert() { return saturn_locked_state; }
+// [MiSTer-DB9-Pro END]
+
+// Returns 1=Saturn, 2=DB9MD, 3=DB15, 0=not detected or cur_val already set.
+int user_io_read_db9_detected(unsigned int cur_val)
+{
+	if (cur_val >= 1 && cur_val <= 3) return 0; // already set by user, don't override
+
+	const char *type = db9_shm_read();
+	if (!type) return 0;
+
+	if (strcmp(type, "Saturn") == 0) return 1;
+	if (strcmp(type, "DB9") == 0) return 2;
+	if (strcmp(type, "DB15") == 0) return 3;
+	return 0;
+}
+
+// Maps joy_type to wire-format string for SHM/log use. NULL for 0/Off.
+// Returns "DB9" not "DB9MD" by design: user_io_auto_db9() strstr-matches
+// this against CONF_STR labels, and "DB9" is a substring of both legacy
+// "DB9" and current "DB9MD" entries. Renaming would break legacy cores.
+const char *db9_type_name(int val)
+{
+	static const char *const names[4] = { NULL, "Saturn", "DB9", "DB15" };
+	return (val >= 0 && val < 4) ? names[val] : NULL;
+}
+// [MiSTer-DB9 END]
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: auto-select UserIO Joystick from detection shm
+static void user_io_auto_db9()
+{
+	const char *type = db9_shm_read();
+	if (!type) return;
+
+	for (int i = 2; ; i++)
+	{
+		char *item = user_io_get_confstr(i);
+		if (!item) break;
+		if (!item[0]) continue;
+
+		char label[256];
+		substrcpy(label, item, 1);
+		if (strcmp(label, "UserIO Joystick") != 0 && strcmp(label, "User port") != 0) continue;
+
+		// Strip H/D/h/d and P prefixes to find the O/o character
+		char prefix[256];
+		substrcpy(prefix, item, 0);
+		char *p = prefix;
+		while ((*p == 'H' || *p == 'D' || *p == 'h' || *p == 'd') && strlen(p) >= 2) p += 2;
+		if (*p == 'P') p += 2;
+
+		if (*p != 'O' && *p != 'o') break;
+
+		int ex = (*p == 'o') ? 1 : 0;
+		char *opt = (p[1] == 'X') ? (p + 2) : (p + 1);
+		if (!*opt) break;
+
+		uint32_t cur = user_io_status_get(opt, ex);
+		if (cur != 0) break; // Already set, don't override
+
+		// Find matching option value
+		for (int vi = 2; ; vi++)
+		{
+			char val[256];
+			if (!substrcpy(val, item, vi)) break;
+			if (strstr(val, type))
+			{
+				user_io_status_set(opt, vi - 2, ex);
+				printf("Auto-enabling %s for %s\n", type, label);
+				break;
+			}
+		}
+		break;
+	}
+}
+// [MiSTer-DB9 END]
+
 void user_io_init(const char *path, const char *xml)
 {
 	char *name;
 	static char mainpath[512];
 	core_name[0] = 0;
 	disable_osd = 0;
+
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: init shared memory for detection
+	db9_shm_init();
+	// [MiSTer-DB9 END]
+	// [MiSTer-DB9-Pro BEGIN] - Saturn key gate (out-of-band SPI command, not status[])
+	db9_key_refresh();
+	spi_uio_cmd8(UIO_DB9_KEY, db9_key_saturn_unlocked() ? 1 : 0);
+	// [MiSTer-DB9-Pro END]
 
 	// Clean up old game ID when loading a new core
 	unlink("/tmp/GAMEID");
@@ -1515,6 +1664,9 @@ void user_io_init(const char *path, const char *xml)
 					memset(cur_status, 0, sizeof(cur_status));
 				}
 
+				// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: auto-enable UserIO from detection shm
+				if (!is_menu()) user_io_auto_db9();
+				// [MiSTer-DB9 END]
 				user_io_status_set("[0]", 1);
 			}
 
@@ -1522,6 +1674,9 @@ void user_io_init(const char *path, const char *xml)
 			if (is_st())
 			{
 				tos_config_load(0);
+				// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: auto-enable UserIO on core launch
+				tos_auto_db9();
+				// [MiSTer-DB9 END]
 				tos_upload(NULL);
 			}
 			else if (is_menu())
@@ -2538,6 +2693,86 @@ int user_io_use_cheats()
 	return use_cheats;
 }
 
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: poll joy_raw ('h0f) for OSD/menu nav + detection
+static void user_io_joyraw_check_change()
+{
+	static const uint8_t joyraw_mapping[14] = {
+		KEY_RIGHT,      // 0    R
+		KEY_LEFT,       // 1    L
+		KEY_DOWN,       // 2    D
+		KEY_UP,         // 3    U
+		KEY_ENTER,      // 4    A
+		KEY_ESC,        // 5    B
+		KEY_RESERVED,   // 6    C
+		KEY_TAB,        // 7    X
+		KEY_RESERVED,   // 8    Y
+		KEY_RESERVED,   // 9    Z
+		KEY_RESERVED,   // 10   S
+		KEY_GRAVE,      // 11   M (DB9MD Mode button / OSD toggle)
+		KEY_RESERVED,   // 12   L_trigger (Saturn only)
+		KEY_GRAVE       // 13   R_trigger (Saturn only / OSD toggle)
+	};
+	static uint16_t joyraw_bits = 0;
+	static uint32_t joyraw_timer = 0;
+
+	// Poll SPI on a fixed time interval (~20Hz), independent of main loop speed.
+	if (joyraw_timer && !CheckTimer(joyraw_timer)) return;
+	joyraw_timer = GetTimer(50);
+
+	spi_uio_cmd_cont(UIO_USERIO_GET);
+	uint16_t joyraw = spi_w(0);
+	DisableIO();
+
+	// XOR detects changes across all 16 bits (14 buttons at [13:0] + 2 type at [15:14]).
+	uint16_t changes = (joyraw ^ joyraw_bits) & 0xFFFF;
+
+	// If nothing changed, we are done. No loop, no branches.
+	if (changes == 0) {
+		return;
+	}
+
+	// DB9/SNAC8 support
+	// Save DB9/DB15 detection state on physical button activity.
+	// Only written when the type changes or shm was cleared by USB/keyboard input.
+	// Type bits come from the FPGA hardware (bits 15-14), not from menu settings,
+	// so detection only fires when a physical controller is connected.
+	// Pointer-equality on `type` is safe: db9_type_name returns stable literals.
+	static const char *last_shm_type = NULL;
+	const char *type = db9_type_name((joyraw >> 14) & 3);
+
+	const char *cur_shm = db9_shm_read();
+	if (type && (!cur_shm || type != last_shm_type))
+	{
+		db9_shm_write(type);
+		last_shm_type = type;
+	}
+
+	// [MiSTer-DB9-Pro BEGIN] - Saturn locked alert state (consumed by menu.cpp status bar)
+	int locked = (type == db9_type_name(1)) && !db9_key_saturn_unlocked();
+	if (locked && !saturn_locked_state) printf("DB9: Saturn pad detected but db9pro.key missing\n");
+	saturn_locked_state = locked;
+	// [MiSTer-DB9-Pro END]
+
+	// Iterate only over changed button bits (0-13) via ctz; usually 0 or 1 iterations.
+	changes &= 0x3FFF; // mask to button bits only, exclude type bits 15-14
+	while (changes) {
+		int i = __builtin_ctz(changes);
+
+		// Determine if this was a Press (1) or Release (0)
+		// We check the *current* joyraw state at that bit index
+		int is_pressed = (joyraw >> i) & 1;
+
+		input_joyraw_kbd(joyraw_mapping[i], is_pressed);
+
+		// Clear the lowest set bit so we can find the next one
+		changes &= changes - 1;
+	}
+
+	// Update history
+	joyraw_bits = joyraw;
+}
+// [MiSTer-DB9 END]
+
 static void check_status_change()
 {
 	static u_int8_t last_status_change = 0;
@@ -3076,14 +3311,14 @@ static uint32_t res_timer = 0;
 void user_io_poll()
 {
 	#ifdef PROFILING
-		PROFILE_FUNCTION();
+	PROFILE_FUNCTION();
 	#endif
 
 	// every frame, check if a screenshot has been requested.
 	// this is reduce risk of screenshot occurring while the scaler
 	// is being updated and getting a corrupted image.
 	add_frame_callback(screenshot_cb);
-	
+
 	if ((core_type != CORE_TYPE_SHARPMZ) &&
 		(core_type != CORE_TYPE_8BIT))
 	{
@@ -3091,6 +3326,9 @@ void user_io_poll()
 	}
 
 	user_io_send_buttons(0);
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: poll joy_raw each user_io_poll tick
+	user_io_joyraw_check_change();
+	// [MiSTer-DB9 END]
 
 	if (is_minimig())
 	{
@@ -4174,7 +4412,7 @@ void user_io_kbd(uint16_t key, int press)
 				if (!osd_is_visible && !is_menu() && key == KEY_MENU && press == 3) open_joystick_setup();
 				else if (is_menu_event)
 				{
-				  if (press == 1) menu_key_set(KEY_F12);
+					if (press == 1) menu_key_set(KEY_F12);
 				}
 				else if (osd_is_visible)
 				{

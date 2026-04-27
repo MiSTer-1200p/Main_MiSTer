@@ -741,5 +741,20 @@ void minimig_set_extcfg(unsigned int ext_cfg)
 
 unsigned int minimig_get_extcfg()
 {
-	return (minimig_config.ext_cfg2 << 16) | minimig_config.ext_cfg;
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support
+	return ((unsigned int)minimig_config.ext_cfg2 << 16) | minimig_config.ext_cfg;
+	// [MiSTer-DB9 END]
 }
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: auto-enable UserIO on core launch
+void minimig_auto_db9()
+{
+	unsigned int cur_val = (minimig_get_extcfg() >> 30) & 3;
+	unsigned int val = user_io_read_db9_detected(cur_val);
+	if (val)
+	{
+		minimig_set_extcfg((minimig_get_extcfg() & ~0xC0000000u) | (val << 30));
+		printf("Auto-enabling %s for Minimig UserIO\n", db9_type_name(val));
+	}
+}
+// [MiSTer-DB9 END]
