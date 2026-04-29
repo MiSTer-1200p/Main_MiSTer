@@ -157,6 +157,50 @@ jobs:
           ensure_include('menu.cpp',    '#include "zaparoo.h"',    'getZaparoo')
           ensure_include('user_io.cpp', '#include "loadscreen.h"', 'load_screen_bg')
 
+          # menu.cpp: aitorgomez defines init_loader_bg_early() but the body
+          # lives in the same hunk as db9 changes, so -X ours drops it. The
+          # declaration in menu.h and the call site survive, leaving an
+          # undefined reference at link time. Re-inject the body after the
+          # first '// [MiSTer-DB9-Pro END]' marker if the call exists but no
+          # definition is present.
+          with open('menu.cpp') as f:
+              src = f.read()
+          if 'init_loader_bg_early();' in src and 'void init_loader_bg_early()' not in src:
+              body = (
+                  'static bool loader_bg_initialized = false;\n'
+                  '\n'
+                  'void init_loader_bg_early()\n'
+                  '{\n'
+                  '\tif (loader_bg_initialized) return;\n'
+                  '\n'
+                  '\tconst char* fname = "loader.png";\n'
+                  '\tif (!FileExists(fname))\n'
+                  '\t{\n'
+                  '\t\tfname = "loader.jpg";\n'
+                  '\t\tif (!FileExists(fname))\n'
+                  '\t\t{\n'
+                  '\t\t\tloader_bg = 1;\n'
+                  '\t\t\tloader_bg_initialized = true;\n'
+                  '\t\t\treturn;\n'
+                  '\t\t}\n'
+                  '\t}\n'
+                  '\n'
+                  '\tloader_bg = 0;\n'
+                  '\tloader_bg_initialized = true;\n'
+                  '\tprintf("loader_bg [EARLY INIT] -> %d\\n", loader_bg);\n'
+                  '}\n'
+                  '\n'
+              )
+              marker = '// [MiSTer-DB9-Pro END]\n'
+              idx = src.find(marker)
+              if idx == -1:
+                  raise SystemExit('menu.cpp: cannot find DB9-Pro END marker to insert init_loader_bg_early')
+              insert_at = idx + len(marker) + 1  # skip the blank line that follows
+              src = src[:insert_at] + body + src[insert_at:]
+              with open('menu.cpp', 'w') as f:
+                  f.write(src)
+              print('menu.cpp: restored init_loader_bg_early() body')
+
           # user_io.cpp: db9's err_strings struct uses 'errno' as a field name.
           # Once <errno.h> is pulled in (e.g. via SNAC8 db9_shm_init logging),
           # the macro expansion breaks the struct decl. Rename to 'err'.
