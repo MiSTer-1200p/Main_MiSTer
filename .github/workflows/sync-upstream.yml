@@ -63,9 +63,15 @@ jobs:
 
       - name: Rebuild full from synced branches
         run: |
-          resolve_conflicts() {
+          # Resolve only release/.github merge conflicts. Anything else aborts:
+          # source-file conflicts must be handled by an explicit merge strategy
+          # (-X ours/-X theirs) on the merge command, never by blind deletion.
+          resolve_auto_conflicts() {
             local label="$1"
+            local prefer="$2"   # 'ours' or 'theirs' for modify/delete fallback
             local unmerged
+            local non_auto
+            local path
 
             unmerged=$(git diff --name-only --diff-filter=U)
             if [ -z "$unmerged" ]; then
@@ -73,35 +79,60 @@ jobs:
               return 1
             fi
 
+            non_auto=$(printf '%s\n' "$unmerged" | grep -vE '^(releases/|\.github/)' || true)
+            if [ -n "$non_auto" ]; then
+              echo "::error::${label}: unexpected conflict in source files:"
+              printf '%s\n' "$non_auto"
+              return 1
+            fi
+
             while IFS= read -r path; do
               [ -n "$path" ] || continue
-              git rm --ignore-unmatch -q -- "$path"
+              case "$path" in
+                releases/*)
+                  # Prefer keeping the file; fall back to delete if it was removed on the chosen side.
+                  if git checkout "--$prefer" -- "$path" 2>/dev/null; then
+                    git add "$path"
+                  else
+                    git rm --ignore-unmatch -q -- "$path"
+                  fi
+                  ;;
+                .github/*)
+                  # .github is rewritten by the "Restore .github" step anyway; drop conflict.
+                  git rm --ignore-unmatch -q -- "$path"
+                  ;;
+              esac
             done <<<"$unmerged"
           }
 
           # Start fresh from master each sync.
           git reset --hard origin/master
 
-          # Merge db9 (DB9 joystick/SNAC support). Since db9 is rebased on
-          # master this is usually conflict-free.
-          if ! git merge origin/db9 --no-edit --allow-unrelated-histories; then
-            resolve_conflicts "Merge db9" || { git merge --abort; exit 1; }
+          # Merge db9 (DB9 joystick/SNAC support). db9 is rebased on master,
+          # so on text conflicts db9 already contains master's changes plus
+          # its own additions: -X theirs is safe and keeps db9's source.
+          if ! git merge origin/db9 --no-edit --allow-unrelated-histories -X theirs; then
+            resolve_auto_conflicts "Merge db9" theirs || { git merge --abort; exit 1; }
             git commit --no-edit
           fi
 
-          # Merge aitorgomez with -X ours so master+db9 always wins conflicts.
+          # Merge aitorgomez with -X ours so master+db9 wins on text conflicts.
           # Aitorgomez's new files (loadscreen.cpp, zaparoo.cpp, etc.) come in
-          # cleanly since new files never conflict. Files that aitorgomez is
-          # behind master on keep the master/db9 version.
+          # cleanly since new files never conflict.
           if ! git merge origin/aitorgomez --no-edit --allow-unrelated-histories -X ours; then
-            resolve_conflicts "Merge aitorgomez" || { git merge --abort; exit 1; }
+            resolve_auto_conflicts "Merge aitorgomez" ours || { git merge --abort; exit 1; }
             git commit --no-edit
           fi
 
       - name: Patch cfg for aitorgomez fields
         run: |
           python3 - <<'EOF'
-          import re, sys
+          import os, sys
+
+          required = ['cfg.h', 'cfg.cpp', 'menu.cpp', 'user_io.cpp']
+          missing = [p for p in required if not os.path.isfile(p)]
+          if missing:
+              raise SystemExit(f'patch step: required files missing after merge: {missing}')
 
           # cfg.h: ensure aitorgomez-specific fields are present before '} cfg_t;'.
           # These are needed by loadscreen.cpp and zaparoo.cpp but live in the same
