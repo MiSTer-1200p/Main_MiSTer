@@ -14,7 +14,10 @@ set -u
 
 rerere_load() {
   local remote="${1:-origin}"
-  local cache=".git/rr-cache"
+  # Resolve via git so this works in linked worktrees too (worktree's
+  # .git is a file, the actual rr-cache lives in the main gitdir).
+  local cache
+  cache="$(git rev-parse --git-path rr-cache)"
 
   mkdir -p "$cache"
 
@@ -31,7 +34,10 @@ rerere_load() {
 
 rerere_save() {
   local remote="${1:-origin}"
-  local cache=".git/rr-cache"
+  # Resolve via git so this works in linked worktrees too (worktree's
+  # .git is a file, the actual rr-cache lives in the main gitdir).
+  local cache
+  cache="$(git rev-parse --git-path rr-cache)"
 
   if [ ! -d "$cache" ] || [ -z "$(ls -A "$cache" 2>/dev/null)" ]; then
     echo "rerere_save: $cache empty; nothing to push"
