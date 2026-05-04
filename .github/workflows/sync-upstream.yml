@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      rebuild_from_master:
+        description: 'EMERGENCY: rebuild full via legacy reset-hard + -X strategies + Python patcher (use only if rerere caches a wrong resolution and the normal merge path wedges).'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   sync-master:
@@ -43,6 +49,8 @@ jobs:
     outputs:
       has_release_changes: ${{ steps.check_releases.outputs.has_release_changes }}
       release_name: ${{ steps.check_releases.outputs.release_name }}
+    env:
+      REBUILD_FROM_MASTER: ${{ inputs.rebuild_from_master && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -58,6 +66,10 @@ jobs:
           # always keep the version already in the branch being merged into.
           git config merge.keep-ours.name "always keep our version"
           git config merge.keep-ours.driver true
+          # Persist conflict resolutions across runs so each unique
+          # conflict only needs human intervention once.
+          git config rerere.enabled true
+          git config rerere.autoupdate true
 
       - name: Fetch synced branches
         run: git fetch origin master db9 aitorgomez
@@ -65,196 +77,19 @@ jobs:
       - name: Save pre-sync HEAD
         run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
-      - name: Rebuild full from synced branches
+      - name: Hydrate rerere cache
+        if: env.REBUILD_FROM_MASTER != 'true'
         run: |
-          # Resolve only release/.github merge conflicts. Anything else aborts:
-          # source-file conflicts must be handled by an explicit merge strategy
-          # (-X ours/-X theirs) on the merge command, never by blind deletion.
-          resolve_auto_conflicts() {
-            local label="$1"
-            local prefer="$2"   # 'ours' or 'theirs' for modify/delete fallback
-            local unmerged
-            local non_auto
-            local path
+          source .github/scripts/rerere-cache.sh
+          rerere_load origin
 
-            unmerged=$(git diff --name-only --diff-filter=U)
-            if [ -z "$unmerged" ]; then
-              echo "::error::${label}: merge failed without conflicts to resolve"
-              return 1
-            fi
+      - name: Compose full (real-merge path)
+        if: env.REBUILD_FROM_MASTER != 'true'
+        run: bash .github/scripts/sync-full-merge.sh
 
-            non_auto=$(printf '%s\n' "$unmerged" | grep -vE '^(releases/|\.github/)' || true)
-            if [ -n "$non_auto" ]; then
-              echo "::error::${label}: unexpected conflict in source files:"
-              printf '%s\n' "$non_auto"
-              return 1
-            fi
-
-            while IFS= read -r path; do
-              [ -n "$path" ] || continue
-              case "$path" in
-                releases/*)
-                  # Prefer keeping the file; fall back to delete if it was removed on the chosen side.
-                  if git checkout "--$prefer" -- "$path" 2>/dev/null; then
-                    git add "$path"
-                  else
-                    git rm --ignore-unmatch -q -- "$path"
-                  fi
-                  ;;
-                .github/*)
-                  # .github is rewritten by the "Restore .github" step anyway; drop conflict.
-                  git rm --ignore-unmatch -q -- "$path"
-                  ;;
-              esac
-            done <<<"$unmerged"
-          }
-
-          # Start fresh from master each sync.
-          git reset --hard origin/master
-
-          # Merge db9 (DB9 joystick/SNAC support). db9 is rebased on master,
-          # so on text conflicts db9 already contains master's changes plus
-          # its own additions: -X theirs is safe and keeps db9's source.
-          if ! git merge origin/db9 --no-edit --allow-unrelated-histories -X theirs; then
-            resolve_auto_conflicts "Merge db9" theirs || { git merge --abort; exit 1; }
-            git commit --no-edit
-          fi
-
-          # Merge aitorgomez with -X ours so master+db9 wins on text conflicts.
-          # Aitorgomez's new files (loadscreen.cpp, zaparoo.cpp, etc.) come in
-          # cleanly since new files never conflict.
-          if ! git merge origin/aitorgomez --no-edit --allow-unrelated-histories -X ours; then
-            resolve_auto_conflicts "Merge aitorgomez" ours || { git merge --abort; exit 1; }
-            git commit --no-edit
-          fi
-
-      - name: Patch cfg for aitorgomez fields
-        run: |
-          python3 - <<'EOF'
-          import os, sys
-
-          required = ['cfg.h', 'cfg.cpp', 'menu.cpp', 'user_io.cpp']
-          missing = [p for p in required if not os.path.isfile(p)]
-          if missing:
-              raise SystemExit(f'patch step: required files missing after merge: {missing}')
-
-          # cfg.h: ensure aitorgomez-specific fields are present before '} cfg_t;'.
-          # These are needed by loadscreen.cpp and zaparoo.cpp but live in the same
-          # struct area as master/db9 changes, so git cannot auto-merge them.
-          with open('cfg.h') as f:
-              h = f.read()
-
-          if 'loading_txt_up' not in h:
-              fields = (
-                  '\tchar loading_txt_up;\n'
-                  '\tchar waiting_txt_up;\n'
-                  '\tchar cfgcore_subfolder[32];\n'
-                  '\tchar cfgarcade_subfolder[32];\n'
-              )
-              h = h.replace('} cfg_t;', fields + '} cfg_t;')
-              with open('cfg.h', 'w') as f:
-                  f.write(h)
-              print('cfg.h: added aitorgomez fields')
-
-          # cfg.cpp: ensure matching INI parsing entries are present.
-          with open('cfg.cpp') as f:
-              c = f.read()
-
-          if 'LOADING_TXT_UP' not in c:
-              entries = (
-                  '\t{ "LOADING_TXT_UP", (void *)(&(cfg.loading_txt_up)), UINT8, 0, 1 },\n'
-                  '\t{ "WAITING_TXT_UP", (void *)(&(cfg.waiting_txt_up)), UINT8, 0, 1 },\n'
-                  '\t{ "CFGCORE_SUBFOLDER", (void*)(&(cfg.cfgcore_subfolder)), STRING, 0, sizeof(cfg.cfgcore_subfolder) - 1 },\n'
-                  '\t{ "CFGARCADE_SUBFOLDER", (void *)(&(cfg.cfgarcade_subfolder)), STRING, 0, sizeof(cfg.cfgarcade_subfolder) - 1 },\n'
-              )
-              c = c.replace('\n};\n\nstatic const int nvars', '\n' + entries + '};\n\nstatic const int nvars', 1)
-              with open('cfg.cpp', 'w') as f:
-                  f.write(c)
-              print('cfg.cpp: added aitorgomez INI entries')
-
-          # menu.cpp and user_io.cpp: aitorgomez's function calls get auto-merged
-          # into db9's file, but the #includes conflict and db9 wins, so the
-          # declarations are missing. Add them if the calls are present but the
-          # includes are not.
-          def ensure_include(filename, include, guard):
-              with open(filename) as f:
-                  src = f.read()
-              if guard in src and include not in src:
-                  # Insert after the last #include line in the file header
-                  last = max(src.rfind('\n#include '), src.rfind('\n#include\t'))
-                  end = src.index('\n', last + 1)
-                  src = src[:end] + '\n' + include + src[end:]
-                  with open(filename, 'w') as f:
-                      f.write(src)
-                  print(f'{filename}: added {include}')
-
-          ensure_include('menu.cpp',    '#include "loadscreen.h"', 'fade_in_screen')
-          ensure_include('menu.cpp',    '#include "zaparoo.h"',    'getZaparoo')
-          ensure_include('user_io.cpp', '#include "loadscreen.h"', 'load_screen_bg')
-
-          # menu.cpp: aitorgomez defines init_loader_bg_early() but the body
-          # lives in the same hunk as db9 changes, so -X ours drops it. The
-          # declaration in menu.h and the call site survive, leaving an
-          # undefined reference at link time. Re-inject the body after the
-          # first '// [MiSTer-DB9-Pro END]' marker if the call exists but no
-          # definition is present.
-          with open('menu.cpp') as f:
-              src = f.read()
-          if 'init_loader_bg_early();' in src and 'void init_loader_bg_early()' not in src:
-              body = (
-                  'static bool loader_bg_initialized = false;\n'
-                  '\n'
-                  'void init_loader_bg_early()\n'
-                  '{\n'
-                  '\tif (loader_bg_initialized) return;\n'
-                  '\n'
-                  '\tconst char* fname = "loader.png";\n'
-                  '\tif (!FileExists(fname))\n'
-                  '\t{\n'
-                  '\t\tfname = "loader.jpg";\n'
-                  '\t\tif (!FileExists(fname))\n'
-                  '\t\t{\n'
-                  '\t\t\tloader_bg = 1;\n'
-                  '\t\t\tloader_bg_initialized = true;\n'
-                  '\t\t\treturn;\n'
-                  '\t\t}\n'
-                  '\t}\n'
-                  '\n'
-                  '\tloader_bg = 0;\n'
-                  '\tloader_bg_initialized = true;\n'
-                  '\tprintf("loader_bg [EARLY INIT] -> %d\\n", loader_bg);\n'
-                  '}\n'
-                  '\n'
-              )
-              marker = '// [MiSTer-DB9-Pro END]\n'
-              idx = src.find(marker)
-              if idx == -1:
-                  raise SystemExit('menu.cpp: cannot find DB9-Pro END marker to insert init_loader_bg_early')
-              insert_at = idx + len(marker) + 1  # skip the blank line that follows
-              src = src[:insert_at] + body + src[insert_at:]
-              with open('menu.cpp', 'w') as f:
-                  f.write(src)
-              print('menu.cpp: restored init_loader_bg_early() body')
-
-          # user_io.cpp: db9's err_strings struct uses 'errno' as a field name.
-          # Once <errno.h> is pulled in (e.g. via SNAC8 db9_shm_init logging),
-          # the macro expansion breaks the struct decl. Rename to 'err'.
-          with open('user_io.cpp') as f:
-              src = f.read()
-          old_decl = 'static struct { const char *fmtstr; Imlib_Load_Error errno; } err_strings[] = {'
-          new_decl = 'static struct { const char *fmtstr; Imlib_Load_Error err;   } err_strings[] = {'
-          if old_decl in src:
-              src = src.replace(old_decl, new_decl)
-              src = src.replace('err_strings[i].errno', 'err_strings[i].err')
-              with open('user_io.cpp', 'w') as f:
-                  f.write(src)
-              print('user_io.cpp: renamed err_strings field errno -> err')
-          EOF
-
-          git add cfg.h cfg.cpp menu.cpp user_io.cpp
-          if ! git diff --cached --quiet; then
-            git commit -m "Add aitorgomez declarations not auto-merged from db9 conflict"
-          fi
+      - name: Compose full (legacy escape hatch)
+        if: env.REBUILD_FROM_MASTER == 'true'
+        run: bash .github/scripts/sync-full-legacy.sh
 
       - name: Check for release changes
         id: check_releases
@@ -331,8 +166,43 @@ jobs:
 
           restore_build_feature_only "$PRE_SYNC"
 
+      - name: Pre-push build gate
+        if: env.REBUILD_FROM_MASTER != 'true'
+        run: |
+          # Skip if no source delta vs PRE_SYNC (release-only / .github-only sync).
+          # The exclude-list mirrors paths whose conflicts are auto-resolved or
+          # whose contents are restored from PRE_SYNC by earlier steps.
+          if git diff --quiet "$PRE_SYNC" HEAD -- \
+              ':!releases/' \
+              ':!.github/' \
+              ':!.gitattributes' \
+              ':!README.md'; then
+            echo "No source changes vs PRE_SYNC; skipping build gate"
+            exit 0
+          fi
+
+          docker run --rm \
+            -v "$PWD:/build" \
+            -w /build \
+            theypsilon/gcc-arm:10.2-2020.11 \
+            bash -c "make clean && make -j\$(nproc)"
+
+          if [ ! -f bin/MiSTer ]; then
+            echo "::error::Pre-push build gate: bin/MiSTer not produced"
+            exit 1
+          fi
+
+          # Don't carry build artifacts into the push.
+          rm -rf bin
+
+      - name: Save rerere cache
+        if: env.REBUILD_FROM_MASTER != 'true'
+        run: |
+          source .github/scripts/rerere-cache.sh
+          rerere_save origin
+
       - name: Push
-        run: git push origin full --force-with-lease
+        run: git push origin full
 
       - name: Update distribution database
         if: steps.check_releases.outputs.has_release_changes != 'true'
