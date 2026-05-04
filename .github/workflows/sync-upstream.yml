@@ -54,6 +54,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Custom merge driver referenced by .gitattributes for .github/**:
+          # always keep the version already in the branch being merged into.
+          git config merge.keep-ours.name "always keep our version"
+          git config merge.keep-ours.driver true
 
       - name: Fetch synced branches
         run: git fetch origin master db9 aitorgomez

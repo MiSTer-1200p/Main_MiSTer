@@ -1,0 +1,4 @@
+# Pin .github tree on integration / fork branches: never let upstream merges
+# overwrite local CI scaffolding. Requires `merge.keep-ours.driver` to be
+# configured in CI (and locally if you run merges by hand).
+.github/** merge=keep-ours
