@@ -77,19 +77,35 @@ jobs:
       - name: Save pre-sync HEAD
         run: echo "PRE_SYNC=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
+      - name: Stage sync helper scripts from master
+        run: |
+          # The `full` branch tracks only .github/workflows/build-feature.yml
+          # (the "Restore .github" step strips everything else), so the helper
+          # scripts that live on master under .github/scripts/ are not
+          # available in the checked-out tree. Materialise them in
+          # $RUNNER_TEMP, which is outside .github/ and untouched by the
+          # restore step, so they remain accessible across all later steps.
+          SCRIPTS_DIR="$RUNNER_TEMP/sync-scripts"
+          mkdir -p "$SCRIPTS_DIR"
+          for f in rerere-cache.sh sync-full-merge.sh sync-full-legacy.sh; do
+            git show "origin/master:.github/scripts/$f" > "$SCRIPTS_DIR/$f"
+            chmod +x "$SCRIPTS_DIR/$f"
+          done
+          echo "SYNC_SCRIPTS=$SCRIPTS_DIR" >> $GITHUB_ENV
+
       - name: Hydrate rerere cache
         if: env.REBUILD_FROM_MASTER != 'true'
         run: |
-          source .github/scripts/rerere-cache.sh
+          source "$SYNC_SCRIPTS/rerere-cache.sh"
           rerere_load origin
 
       - name: Compose full (real-merge path)
         if: env.REBUILD_FROM_MASTER != 'true'
-        run: bash .github/scripts/sync-full-merge.sh
+        run: bash "$SYNC_SCRIPTS/sync-full-merge.sh"
 
       - name: Compose full (legacy escape hatch)
         if: env.REBUILD_FROM_MASTER == 'true'
-        run: bash .github/scripts/sync-full-legacy.sh
+        run: bash "$SYNC_SCRIPTS/sync-full-legacy.sh"
 
       - name: Check for release changes
         id: check_releases
@@ -198,7 +214,7 @@ jobs:
       - name: Save rerere cache
         if: env.REBUILD_FROM_MASTER != 'true'
         run: |
-          source .github/scripts/rerere-cache.sh
+          source "$SYNC_SCRIPTS/rerere-cache.sh"
           rerere_save origin
 
       - name: Push
