@@ -38,10 +38,11 @@ rerere_save() {
     return 0
   fi
 
+  # mktemp -u: just generate a unique name, don't create the file.
+  # `git update-index` initialises the index itself; an existing empty
+  # file fails with "index file smaller than expected".
   local tmpidx
-  tmpidx="$(mktemp)"
-  # shellcheck disable=SC2064
-  trap "rm -f '$tmpidx'" RETURN
+  tmpidx="$(mktemp -u)"
 
   local f rel sha
   while IFS= read -r -d '' f; do
@@ -52,6 +53,7 @@ rerere_save() {
 
   local tree
   tree="$(GIT_INDEX_FILE="$tmpidx" git write-tree)"
+  rm -f "$tmpidx"
 
   local parent_args=()
   if git fetch --no-tags --depth=1 "$remote" "$RERERE_BRANCH" 2>/dev/null; then
