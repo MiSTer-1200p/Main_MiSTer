@@ -29,6 +29,32 @@ jobs:
           ref: ${{ inputs.branch || github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Materialize MASTER_ROOT secret (db9/full only)
+        if: env.TARGET_BRANCH == 'db9' || env.TARGET_BRANCH == 'full'
+        env:
+          MASTER_ROOT_HEX: ${{ secrets.MASTER_ROOT_HEX }}
+        run: |
+          if [ -z "${MASTER_ROOT_HEX}" ] || ! [[ "${MASTER_ROOT_HEX}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::warning::MASTER_ROOT_HEX not set or malformed (need 64 hex chars) - build will ship locked"
+            exit 0
+          fi
+          KEY_CPP=$(find . -maxdepth 2 -name db9_key.cpp -type f -print -quit)
+          if [ -z "${KEY_CPP}" ]; then
+            echo "::warning::db9_key.cpp not found - nothing to materialize"
+            exit 0
+          fi
+          SECRET_H="$(dirname "${KEY_CPP}")/db9_key_secret.h"
+          SECRET_H="${SECRET_H}" python3 - <<'PY'
+          import os
+          b = bytes.fromhex(os.environ["MASTER_ROOT_HEX"].strip())
+          rows = ",\n\t".join(", ".join(f"0x{x:02x}" for x in b[i:i+8]) for i in range(0, 32, 8))
+          with open(os.environ["SECRET_H"], "w") as f:
+              f.write("// CI-injected v1.5 MASTER_ROOT (do not commit)\n")
+              f.write("#pragma once\n#include <stdint.h>\n")
+              f.write(f"static const uint8_t MASTER_ROOT[32] = {{\n\t{rows}\n}};\n")
+          PY
+          echo "[DB9-Key v1.5] ${SECRET_H} materialized"
+
       - name: Build with Docker
         run: |
           docker run --rm \
