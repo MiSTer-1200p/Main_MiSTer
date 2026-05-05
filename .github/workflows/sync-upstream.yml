@@ -183,9 +183,8 @@ jobs:
             echo "::error::Pre-push build gate: bin/MiSTer not produced"
             exit 1
           fi
-
-          # Don't carry build artifacts into the push.
-          rm -rf bin
+          # bin/ is gitignored (inherited from db9), so root-owned docker
+          # artifacts won't enter the push. No cleanup needed.
 
       - name: Push
         # full is rebuilt from db9 + aitorgomez every cycle (history
