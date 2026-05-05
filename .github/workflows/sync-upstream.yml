@@ -218,7 +218,11 @@ jobs:
           rerere_save origin
 
       - name: Push
-        run: git push origin full
+        # --force-with-lease lets the legacy path (which resets full to
+        # origin/db9) push a non-fast-forward update, while still aborting
+        # if origin/full advanced concurrently. The expected tip is PRE_SYNC,
+        # which equals the remote tip we checked out at the start of the job.
+        run: git push --force-with-lease=full:"$PRE_SYNC" origin full
 
       - name: Update distribution database
         if: steps.check_releases.outputs.has_release_changes != 'true'
