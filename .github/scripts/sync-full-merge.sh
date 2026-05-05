@@ -96,9 +96,12 @@ PRE_SYNC="${PRE_SYNC:-$(git rev-parse HEAD)}"
 echo "sync-full-merge: PRE_SYNC=${PRE_SYNC} ($(git log -1 --format='%h %s' "$PRE_SYNC"))"
 
 # Order matters for rerere matching: same order each cycle keeps cached
-# resolutions applicable. master first brings new upstream code; db9
-# and aitorgomez then layer on their fork-specific changes.
-merge_branch master     origin/master
+# resolutions applicable. master is intentionally NOT merged here -
+# upstream MiSTer-devel content arrives transitively via db9 and
+# aitorgomez, both of which sync MiSTer-devel master into their own
+# upstreams. Direct master->full merges produced recurring conflicts
+# (cfg.h, cfg.cpp, menu.cpp, MiSTer.ini) whose shape shifted with
+# every new master commit, defeating rerere.
 merge_branch db9        origin/db9
 merge_branch aitorgomez origin/aitorgomez
 

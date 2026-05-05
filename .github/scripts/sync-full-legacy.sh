@@ -50,12 +50,7 @@ resolve_auto_conflicts() {
   done <<<"$unmerged"
 }
 
-git reset --hard origin/master
-
-if ! git merge origin/db9 --no-edit --allow-unrelated-histories -X theirs; then
-  resolve_auto_conflicts "Merge db9" theirs || { git merge --abort; exit 1; }
-  git commit --no-edit
-fi
+git reset --hard origin/db9
 
 if ! git merge origin/aitorgomez --no-edit --allow-unrelated-histories -X ours; then
   resolve_auto_conflicts "Merge aitorgomez" ours || { git merge --abort; exit 1; }
