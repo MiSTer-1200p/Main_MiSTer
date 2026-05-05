@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Legacy `full` rebuild path. Resets to origin/master and merges
-# db9/aitorgomez with `-X theirs` / `-X ours`, then string-patches
-# cfg.h, cfg.cpp, menu.cpp, user_io.cpp to undo what those strategies
-# silently dropped.
+# `full` rebuild path. Resets to origin/db9 and merges aitorgomez with
+# `-X ours`, then string-patches cfg.h, cfg.cpp, menu.cpp, user_io.cpp
+# to re-inject aitorgomez declarations that `-X ours` silently dropped.
 #
-# Kept ONLY as the emergency escape hatch behind sync-upstream.yml's
-# `rebuild_from_master` workflow_dispatch input. The default sync path
-# is sync-full-merge.sh, which uses real merges + rerere instead.
+# Idempotent every cycle: same db9 + aitorgomez tips -> same full tip,
+# regardless of prior full state. Workflow follows up by restoring own
+# files (releases/, README.md) and .github/workflows/build-feature.yml
+# from PRE_SYNC, then force-pushes.
 #
-# Do not extend this; if a new patch is needed, the persistent merge
-# path is the right place (resolve in source, let rerere remember).
+# Replaces the previous merge-into-tip + rerere model, which was
+# fragile: every db9/aitorgomez change to a non-whitelisted file
+# required human intervention to seed a new rerere entry.
 
 set -euo pipefail
 

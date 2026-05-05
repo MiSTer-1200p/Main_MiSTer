@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
-    inputs:
-      rebuild_from_master:
-        description: 'EMERGENCY: rebuild full via legacy reset-hard + -X strategies + Python patcher (use only if rerere caches a wrong resolution and the normal merge path wedges).'
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   sync-master:
@@ -49,8 +43,6 @@ jobs:
     outputs:
       has_release_changes: ${{ steps.check_releases.outputs.has_release_changes }}
       release_name: ${{ steps.check_releases.outputs.release_name }}
-    env:
-      REBUILD_FROM_MASTER: ${{ inputs.rebuild_from_master && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -66,10 +58,6 @@ jobs:
           # always keep the version already in the branch being merged into.
           git config merge.keep-ours.name "always keep our version"
           git config merge.keep-ours.driver true
-          # Persist conflict resolutions across runs so each unique
-          # conflict only needs human intervention once.
-          git config rerere.enabled true
-          git config rerere.autoupdate true
 
       - name: Fetch synced branches
         run: git fetch origin master db9 aitorgomez
@@ -87,25 +75,14 @@ jobs:
           # restore step, so they remain accessible across all later steps.
           SCRIPTS_DIR="$RUNNER_TEMP/sync-scripts"
           mkdir -p "$SCRIPTS_DIR"
-          for f in rerere-cache.sh sync-full-merge.sh sync-full-legacy.sh; do
+          for f in sync-full-rebuild.sh; do
             git show "origin/master:.github/scripts/$f" > "$SCRIPTS_DIR/$f"
             chmod +x "$SCRIPTS_DIR/$f"
           done
           echo "SYNC_SCRIPTS=$SCRIPTS_DIR" >> $GITHUB_ENV
 
-      - name: Hydrate rerere cache
-        if: env.REBUILD_FROM_MASTER != 'true'
-        run: |
-          source "$SYNC_SCRIPTS/rerere-cache.sh"
-          rerere_load origin
-
-      - name: Compose full (real-merge path)
-        if: env.REBUILD_FROM_MASTER != 'true'
-        run: bash "$SYNC_SCRIPTS/sync-full-merge.sh"
-
-      - name: Compose full (legacy escape hatch)
-        if: env.REBUILD_FROM_MASTER == 'true'
-        run: bash "$SYNC_SCRIPTS/sync-full-legacy.sh"
+      - name: Compose full (rebuild from db9 + aitorgomez)
+        run: bash "$SYNC_SCRIPTS/sync-full-rebuild.sh"
 
       - name: Check for release changes
         id: check_releases
@@ -183,7 +160,6 @@ jobs:
           restore_build_feature_only "$PRE_SYNC"
 
       - name: Pre-push build gate
-        if: env.REBUILD_FROM_MASTER != 'true'
         run: |
           # Skip if no source delta vs PRE_SYNC (release-only / .github-only sync).
           # The exclude-list mirrors paths whose conflicts are auto-resolved or
@@ -211,17 +187,11 @@ jobs:
           # Don't carry build artifacts into the push.
           rm -rf bin
 
-      - name: Save rerere cache
-        if: env.REBUILD_FROM_MASTER != 'true'
-        run: |
-          source "$SYNC_SCRIPTS/rerere-cache.sh"
-          rerere_save origin
-
       - name: Push
-        # --force-with-lease lets the legacy path (which resets full to
-        # origin/db9) push a non-fast-forward update, while still aborting
-        # if origin/full advanced concurrently. The expected tip is PRE_SYNC,
-        # which equals the remote tip we checked out at the start of the job.
+        # full is rebuilt from db9 + aitorgomez every cycle (history
+        # rewritten), so pushes are always non-fast-forward. --force-with-lease
+        # against PRE_SYNC (the tip we checked out) aborts if origin/full
+        # advanced concurrently.
         run: git push --force-with-lease=full:"$PRE_SYNC" origin full
 
       - name: Update distribution database
