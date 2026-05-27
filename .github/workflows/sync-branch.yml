@@ -22,6 +22,9 @@ on:
       has_release_changes:
         description: "Whether release changes were detected"
         value: ${{ jobs.sync.outputs.has_release_changes }}
+      has_source_changes:
+        description: "Whether the rebased tree diverges from PRE_SYNC in code (anything outside releases/, .github/, .gitattributes, README.md)"
+        value: ${{ jobs.sync.outputs.has_source_changes }}
       release_name:
         description: "The name of the detected release"
         value: ${{ jobs.sync.outputs.release_name }}
@@ -31,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_release_changes: ${{ steps.check_releases.outputs.has_release_changes }}
+      has_source_changes: ${{ steps.check_source.outputs.has_source_changes }}
       release_name: ${{ steps.check_releases.outputs.release_name }}
     steps:
       - uses: actions/checkout@v6
@@ -176,6 +180,25 @@ jobs:
             echo "has_release_changes=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Check source changes
+        id: check_source
+        run: |
+          # Upstream MiSTer-DB9 moved stable publication off-tree to GitHub
+          # Releases, so rebases stopped adding files to releases/ — relying
+          # on Check-for-release-changes alone leaves db/<branch> pointing at
+          # an ever-staler binary even as cfg.cpp/etc. keep advancing. Source
+          # delta (anything outside releases/, .github/, .gitattributes,
+          # README.md) is the right trigger for "rebuild + republish db".
+          if git diff --quiet "$PRE_SYNC" HEAD -- \
+              ':!releases/' \
+              ':!.github/' \
+              ':!.gitattributes' \
+              ':!README.md'; then
+            echo "has_source_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_source_changes=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Restore releases
         run: |
           if ! git diff --quiet $PRE_SYNC HEAD -- releases/; then
@@ -197,7 +220,7 @@ jobs:
         run: git push origin ${{ inputs.branch }} --force-with-lease
 
       - name: Update distribution database
-        if: steps.check_releases.outputs.has_release_changes != 'true'
+        if: steps.check_releases.outputs.has_release_changes != 'true' && steps.check_source.outputs.has_source_changes != 'true'
         run: |
           BRANCH="${{ inputs.branch }}"
           DB_BRANCH="db/${BRANCH}"
@@ -246,9 +269,11 @@ jobs:
 
   build:
     needs: sync
-    if: needs.sync.outputs.has_release_changes == 'true'
+    if: needs.sync.outputs.has_release_changes == 'true' || needs.sync.outputs.has_source_changes == 'true'
     uses: ./.github/workflows/build-feature.yml
     with:
       branch: ${{ inputs.branch }}
+      # release_name passes through only when upstream actually added a file
+      # to releases/ — otherwise build-feature.yml falls back to MiSTer_<DATE>.
       release_name: ${{ needs.sync.outputs.release_name }}
     secrets: inherit

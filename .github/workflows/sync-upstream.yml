@@ -42,6 +42,7 @@ jobs:
     if: always() && !cancelled()
     outputs:
       has_release_changes: ${{ steps.check_releases.outputs.has_release_changes }}
+      has_source_changes: ${{ steps.check_source.outputs.has_source_changes }}
       release_name: ${{ steps.check_releases.outputs.release_name }}
     steps:
       - uses: actions/checkout@v6
@@ -159,20 +160,28 @@ jobs:
 
           restore_build_feature_only "$PRE_SYNC"
 
-      - name: Pre-push build gate
+      - name: Check source changes
+        id: check_source
         run: |
-          # Skip if no source delta vs PRE_SYNC (release-only / .github-only sync).
-          # The exclude-list mirrors paths whose conflicts are auto-resolved or
-          # whose contents are restored from PRE_SYNC by earlier steps.
+          # Anything outside the auto-resolved / restored paths counts as a
+          # source delta vs PRE_SYNC. The output drives both the pre-push
+          # build gate below AND the build-full job's republish trigger —
+          # db9 upstream moved stable releases off-tree to GitHub Releases,
+          # so release-name detection alone leaves db/full pointing at an
+          # ever-staler binary while full's source keeps advancing.
           if git diff --quiet "$PRE_SYNC" HEAD -- \
               ':!releases/' \
               ':!.github/' \
               ':!.gitattributes' \
               ':!README.md'; then
-            echo "No source changes vs PRE_SYNC; skipping build gate"
-            exit 0
+            echo "has_source_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_source_changes=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Pre-push build gate
+        if: steps.check_source.outputs.has_source_changes == 'true'
+        run: |
           docker run --rm \
             -v "$PWD:/build" \
             -w /build \
@@ -194,7 +203,7 @@ jobs:
         run: git push --force-with-lease=full:"$PRE_SYNC" origin full
 
       - name: Update distribution database
-        if: steps.check_releases.outputs.has_release_changes != 'true'
+        if: steps.check_releases.outputs.has_release_changes != 'true' && steps.check_source.outputs.has_source_changes != 'true'
         run: |
           BRANCH="full"
           DB_BRANCH="db/${BRANCH}"
@@ -251,7 +260,11 @@ jobs:
         needs.sync-master.outputs.has_release_changes == 'true' ||
         needs.sync-db9.outputs.has_release_changes == 'true' ||
         needs.sync-aitorgomez.outputs.has_release_changes == 'true' ||
-        needs.sync-full.outputs.has_release_changes == 'true'
+        needs.sync-full.outputs.has_release_changes == 'true' ||
+        needs.sync-master.outputs.has_source_changes == 'true' ||
+        needs.sync-db9.outputs.has_source_changes == 'true' ||
+        needs.sync-aitorgomez.outputs.has_source_changes == 'true' ||
+        needs.sync-full.outputs.has_source_changes == 'true'
       )
     uses: ./.github/workflows/build-feature.yml
     with:
