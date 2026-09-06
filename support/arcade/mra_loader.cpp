@@ -67,7 +67,9 @@ void arcade_nvm_save()
 {
 	if(nvram_idx && nvram_size)
 	{
-		char path[256] = CONFIG_DIR"/nvram/";
+		char path[256] = {0};
+		strcat(path, config_dir);
+		strcat(path, "/nvram/");
 		FileCreatePath(path);
 		strcat(path, nvram_name);
 
@@ -135,7 +137,7 @@ void arcade_sw_save()
 	if (sw->dip_num && sw->dip_saved != sw->dip_cur)
 	{
 		static char path[1024];
-		strcpy(path, CONFIG_DIR"/dips/");
+		sprintf(path, "%s/dips/", config_dir);
 		FileCreatePath(path);
 		strcat(path, sw->name);
 		if (FileSave(path, &sw->dip_cur, sizeof(sw->dip_cur)))
@@ -1046,20 +1048,22 @@ static int xml_read_pre_parse(XMLEvent evt, const XMLNode* node, SXML_CHAR* text
 	static bool insetname = false;
 	static bool inrotation = false;
 	static int  samedir = 0;
+	static int  cfgcore_subfolder = 0;
 
 	static bool foundsetname = false;
 	static bool foundrotation = false;
 
 	switch (evt)
 	{
-	case XML_EVENT_START_DOC:
-		insetname = false;
-		inrotation = false;
-		foundsetname = false;
-		foundrotation = false;
-		samedir = 0;
-		rotation_dir = 0;
-		break;
+		case XML_EVENT_START_DOC:
+			insetname = false;
+			inrotation = false;
+			foundsetname = false;
+			foundrotation = false;
+			samedir = 0;
+			rotation_dir = 0;
+			cfgcore_subfolder = 0;
+			break;
 
 	case XML_EVENT_START_NODE:
 		if (!strcasecmp(node->tag, "setname"))
@@ -1070,6 +1074,7 @@ static int xml_read_pre_parse(XMLEvent evt, const XMLNode* node, SXML_CHAR* text
 			for (int i = 0; i < node->n_attributes; i++)
 			{
 				if (!strcasecmp(node->attributes[i].name, "same_dir") && !strcmp(node->attributes[i].value, "1")) samedir = 1;
+				else if (!strcasecmp(node->attributes[i].name, "cfgcore_subfolder") && !strcmp(node->attributes[i].value, "1")) cfgcore_subfolder = 1;
 			}
 		}
 		else if (!strcasecmp(node->tag, "rotation"))
@@ -1079,15 +1084,15 @@ static int xml_read_pre_parse(XMLEvent evt, const XMLNode* node, SXML_CHAR* text
 		}
 		break;
 
-	case XML_EVENT_TEXT:
-		if(insetname)
-		{
-			user_io_name_override(text, samedir);
-			// Capture setname for game ID
-			snprintf(arcade_setname, sizeof(arcade_setname), "%s", text);
-		}
-		if(inrotation)
-		{
+		case XML_EVENT_TEXT:
+			if(insetname)
+			{
+				user_io_name_override(text, samedir, cfgcore_subfolder);
+				// Capture setname for game ID
+				snprintf(arcade_setname, sizeof(arcade_setname), "%s", text);
+			}
+			if(inrotation)
+			{
 			is_vertical = strncasecmp(text, "vertical", 8) == 0;
 
 			rotation_dir = 0;
@@ -1409,6 +1414,91 @@ static int scan_mgl(XMLEvent evt, const XMLNode* node, SXML_CHAR* text, const in
 				}
 
 				printf("  action=reset\n  delay=%d\n  hold=%d\n\n", mgl.item[mgl.count].delay, mgl.item[mgl.count].hold);
+				if (mgl.item[mgl.count].valid) mgl.count++;
+			}
+			else if (!strcasecmp(node->tag, "x86_launcher"))
+			{
+				mgl.item[mgl.count].action = MGL_ACTION_X86_LAUNCHER;
+
+				for (int i = 0; i < node->n_attributes; i++)
+				{
+					if (!strcasecmp(node->attributes[i].name, "delay"))
+					{
+						mgl.item[mgl.count].delay = strtoul(node->attributes[i].value, NULL, 0);
+						mgl.item[mgl.count].valid |= 2;
+					}
+					else if (!strcasecmp(node->attributes[i].name, "appid"))
+					{
+						snprintf(mgl.item[mgl.count].x86_appid, sizeof(mgl.item[mgl.count].x86_appid), "%s", node->attributes[i].value);
+						mgl.item[mgl.count].valid |= 4;
+					}
+				}
+
+				printf("  action=x86_launcher\n  appid=%s\n  delay=%d\n\n", mgl.item[mgl.count].x86_appid, mgl.item[mgl.count].delay);
+				if (mgl.item[mgl.count].valid == 0x6)
+				{
+					mgl.item[mgl.count].valid = 1;
+					mgl.count++;
+				}
+				else
+				{
+					mgl.item[mgl.count].valid = 0;
+				}
+			}
+			else if (!strcasecmp(node->tag, "fade_in"))
+			{
+				mgl.item[mgl.count].action = MGL_ACTION_FADE_IN;
+
+				for (int i = 0; i < node->n_attributes; i++)
+				{
+					if (!strcasecmp(node->attributes[i].name, "delay"))
+					{
+						mgl.item[mgl.count].delay = strtoul(node->attributes[i].value, NULL, 0);
+						mgl.item[mgl.count].valid = 1;
+					}
+					else if (!strcasecmp(node->attributes[i].name, "cover"))
+					{
+						snprintf(mgl.item[mgl.count].path, sizeof(mgl.item[mgl.count].path), "/%s", node->attributes[i].value);
+					}
+					else if (!strcasecmp(node->attributes[i].name, "logo"))
+					{
+						snprintf(mgl.item[mgl.count].logo, sizeof(mgl.item[mgl.count].logo), "/%s", node->attributes[i].value);
+					}
+					else if (!strcasecmp(node->attributes[i].name, "mute"))
+					{
+						mgl.item[mgl.count].mute = strtoul(node->attributes[i].value, NULL, 0);
+					}
+					else if (!strcasecmp(node->attributes[i].name, "hold"))
+					{
+						mgl.item[mgl.count].hold = strtoul(node->attributes[i].value, NULL, 0);
+					}
+				}
+
+				printf("  action=fade_in\n  delay=%d\n  hold=%d\n\n", mgl.item[mgl.count].delay, mgl.item[mgl.count].hold);
+				if (mgl.item[mgl.count].valid) mgl.count++;
+			}
+			else if (!strcasecmp(node->tag, "fade_out"))
+			{
+				mgl.item[mgl.count].action = MGL_ACTION_FADE_OUT;
+
+				for (int i = 0; i < node->n_attributes; i++)
+				{
+					if (!strcasecmp(node->attributes[i].name, "delay"))
+					{
+						mgl.item[mgl.count].delay = strtoul(node->attributes[i].value, NULL, 0);
+						mgl.item[mgl.count].valid = 1;
+					}
+					else if (!strcasecmp(node->attributes[i].name, "mute"))
+					{
+						mgl.item[mgl.count].mute = strtoul(node->attributes[i].value, NULL, 0);
+					}
+					else if (!strcasecmp(node->attributes[i].name, "hold"))
+					{
+						mgl.item[mgl.count].hold = strtoul(node->attributes[i].value, NULL, 0);
+					}
+				}
+
+				printf("  action=fade_out\n  delay=%d\n  hold=%d\n\n", mgl.item[mgl.count].delay, mgl.item[mgl.count].hold);
 				if (mgl.item[mgl.count].valid) mgl.count++;
 			}
 		}
