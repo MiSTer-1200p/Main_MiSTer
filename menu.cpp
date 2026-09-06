@@ -68,7 +68,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "autofire.h"
 // [MiSTer-DB9-Pro BEGIN] - hide Saturn from OSD when key locked
 #include "db9_key.h"
+#include "loadscreen.h"
+#include "zaparoo.h"
 // [MiSTer-DB9-Pro END]
+
+static bool loader_bg_initialized = false;
+
+void init_loader_bg_early()
+{
+	if (loader_bg_initialized) return;
+
+	const char* fname = "loader.png";
+	if (!FileExists(fname))
+	{
+		fname = "loader.jpg";
+		if (!FileExists(fname))
+		{
+			loader_bg = 1;
+			loader_bg_initialized = true;
+			return;
+		}
+	}
+
+	loader_bg = 0;
+	loader_bg_initialized = true;
+	printf("loader_bg [EARLY INIT] -> %d\n", loader_bg);
+}
 
 /*menu states*/
 enum MENU
